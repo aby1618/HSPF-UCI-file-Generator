@@ -42,7 +42,6 @@ def parse_shapes(root):
     Returns { internal_id: { ... }, ... }
     """
     shapes_by_id = {}
-    # No namespace in your file, so we do not use a prefix
     shape_cells = root.xpath(".//mxCell[@vertex='1']")
     for cell in shape_cells:
         internal_id = cell.get("id", "").strip()
@@ -50,25 +49,30 @@ def parse_shapes(root):
         label = cell.get("value", "").strip()
 
         if not internal_id:
-            continue  # skip shapes with no ID
+            continue
 
+        recognized = False
         # Classification by style
         # We'll do if/elif to avoid conflicting matches
-        hydro_type = None
         if "ellipse;" in style:
-            # e.g. ellipse;whiteSpace=wrap;html=1;...
             hydro_type = "Subcatchment"
+            recognized = True
         elif "shape=hexagon" in style:
-            # e.g. shape=hexagon;perimeter=hexagonPerimeter2;...
             hydro_type = "RCHRES"
+            recognized = True
         elif "shape=waypoint" in style and "perimeter=centerperimeter" in style:
-            # e.g. shape=waypoint;...;perimeter=centerPerimeter
             hydro_type = "Node"
+            recognized = True
         elif "triangle;" in style:
-            # e.g. triangle;whiteSpace=wrap;...
             hydro_type = "SWM Facility"
+            recognized = True
         else:
             hydro_type = "Comment/Note"
+
+        # Optional: produce a debug print or store a "warning" if not recognized
+        if not recognized:
+            print(
+                f"WARNING: Shape with ID {internal_id} and style='{style}' was not recognized; treating as Comment/Note.")
 
         shapes_by_id[internal_id] = {
             "id": internal_id,
@@ -97,20 +101,51 @@ def parse_edges(root):
 
     return edges
 
+
 def build_graph(shapes_by_id, edges):
     """
-    For each (src, tgt, style), if neither is missing,
-    add src->tgt to 'outgoing' and tgt->src to 'incoming'.
-    Skips dashed lines (if any).
+    For each (src, tgt, style), add:
+        src -> tgt to 'outgoing'
+        tgt -> src to 'incoming'
+    Distinguish dashed=1 (Groundwater) vs. solid (Surface).
     """
     for (src, tgt, style) in edges:
-        # If the line is dashed=1, we skip it
-        if "dashed=1" in style:
-            continue
-
         if src in shapes_by_id and tgt in shapes_by_id:
-            shapes_by_id[src]["outgoing"].append(tgt)
-            shapes_by_id[tgt]["incoming"].append(src)
+            flow_type = "Groundwater" if "dashed=1" in style else "Surface"
+
+            shapes_by_id[src]["outgoing"].append({
+                "target": tgt,
+                "flow_type": flow_type
+            })
+            shapes_by_id[tgt]["incoming"].append({
+                "source": src,
+                "flow_type": flow_type
+            })
+
+
+def compute_branch_length(shapes_by_id, start_id, memo=None):
+    """
+    Returns the maximum depth from 'start_id' down to any leaf.
+    This helps us prioritize outflows from longest to shortest branch.
+    """
+    if memo is None:
+        memo = {}
+    if start_id in memo:
+        return memo[start_id]
+
+    outgoings = shapes_by_id[start_id]["outgoing"]
+    if not outgoings:
+        memo[start_id] = 1
+        return 1
+
+    max_depth = 0
+    for out_dict in outgoings:
+        tgt_id = out_dict["target"]
+        depth_tgt = compute_branch_length(shapes_by_id, tgt_id, memo)
+        if depth_tgt > max_depth:
+            max_depth = depth_tgt
+    memo[start_id] = 1 + max_depth
+    return memo[start_id]
 
 def narrative_summary(shapes_by_id):
     """
@@ -121,15 +156,20 @@ def narrative_summary(shapes_by_id):
         consecutively for all incoming lines, then we show NodeX's own outflow.
     """
 
-    visited_lines = set()  # We'll store lines like ("sub_id","node_id") so we don't repeat them
-    visited_targets = set()  # We'll store shapes fully processed
+    visited_lines = set()
+    visited_targets = set()
     lines = []
 
-    def add_line(source_id, target_id):
-        """Helper to add a line 'ShapeType Label → ShapeType Label' to lines[] if not visited."""
-        line_key = (source_id, target_id)
+    # Precompute branch lengths for each shape
+    memo_lengths = {}
+    for sid in shapes_by_id:
+        compute_branch_length(shapes_by_id, sid, memo_lengths)
+
+    def add_line(source_id, target_id, flow_type):
+        """Add a line 'Source discharges (Surface/Groundwater) to Target' if not visited."""
+        line_key = (source_id, target_id, flow_type)
         if line_key in visited_lines:
-            return  # already listed
+            return
         visited_lines.add(line_key)
 
         source_data = shapes_by_id[source_id]
@@ -139,72 +179,83 @@ def narrative_summary(shapes_by_id):
         tgt_type = target_data["hydro_type"]
         tgt_label = target_data["label"] or target_id
 
-        lines.append(f"{src_type} {src_label} discharges to {tgt_type} {tgt_label}.")
+        flow_text = "(Surface)" if flow_type == "Surface" else "(Groundwater)"
+        lines.append(f"{src_type} {src_label} discharges {flow_text} to {tgt_type} {tgt_label}.")
 
     def process_target(target_id):
-        """
-        Once we reach a target shape (e.g., NodeX),
-        we gather all *other* shapes that also feed into this target,
-        placing them immediately after.
-        Then, after listing all feeders, we proceed with target's outflow.
-        """
         # If we've already fully processed this shape, skip
         if target_id in visited_targets:
             return
 
-        # 1) For each shape that flows into target_id,
-        #    if that line is unvisited, create it and recursively process that feeder first.
-        for incoming_id in shapes_by_id[target_id]["incoming"]:
-            line_key = (incoming_id, target_id)
-            if line_key not in visited_lines:
-                # Recursively ensure *its* incoming feeders are processed
-                process_target(incoming_id)
-                # Now add the line from incoming_id → target_id
-                add_line(incoming_id, target_id)
+        # (1) Process all incoming feeders first (they might not have been processed yet).
+        for inc_dict in shapes_by_id[target_id]["incoming"]:
+            incoming_id = inc_dict["source"]
+            flow_type = inc_dict["flow_type"]
 
-        # 2) Once we've listed all lines that feed into target_id,
-        #    we handle target_id's outflow (target_id → next).
+            line_key = (incoming_id, target_id, flow_type)
+            if line_key not in visited_lines:
+                process_target(incoming_id)
+                add_line(incoming_id, target_id, flow_type)
+
+        # (2) Sort outgoings by descending branch length
         outgoings = shapes_by_id[target_id]["outgoing"]
         if not outgoings:
+            # No outflow
             data = shapes_by_id[target_id]
             if data["hydro_type"] != "Comment/Note":
+                # Print "does not discharge..." only once
                 lines.append(f"{data['hydro_type']} {data['label']} does not discharge to any recognized element.")
         else:
-            for nxt_id in outgoings:
-                add_line(target_id, nxt_id)
+            # Sort by descending branch length
+            outgoings_sorted = sorted(
+                outgoings,
+                key=lambda od: memo_lengths[od["target"]],
+                reverse=True
+            )
+            for out_dict in outgoings_sorted:
+                nxt_id = out_dict["target"]
+                flow_type = out_dict["flow_type"]
+                add_line(target_id, nxt_id, flow_type)
                 process_target(nxt_id)
 
-        # Mark this shape as fully processed now that we've listed its incoming and outgoing
         visited_targets.add(target_id)
 
-    # -------------
     # MAIN LOGIC
-    # -------------
-    # We'll start with shapes that have no incoming edges (typical "sources" like subcatchments).
-    start_shapes = [sid for sid, data in shapes_by_id.items()
-                    if data["hydro_type"] != "Comment/Note" and not data["incoming"]]
-
-    # Process those "source" shapes
+    start_shapes = [
+        sid for sid, data in shapes_by_id.items()
+        if data["hydro_type"] != "Comment/Note" and not data["incoming"]
+    ]
     for s_id in start_shapes:
-        # Do NOT add s_id to visited_targets here—just call process_target
         process_target(s_id)
 
-    # Now, if there are shapes that never got visited (disconnected or merges),
-    # we process them too.
+    # If any shapes remain unvisited (possibly orphaned or merges), process them
     for sid in shapes_by_id:
         if sid not in visited_targets:
             process_target(sid)
 
+    # --------------------------------------------------
+    # HIGHLIGHT ORPHANS HERE, before returning the lines
+    # --------------------------------------------------
+    orphans = []
+    for sid, data in shapes_by_id.items():
+        if not data["incoming"] and not data["outgoing"] and data["hydro_type"] != "Comment/Note":
+            orphans.append(sid)
+
+    if orphans:
+        lines.append("The following shapes are not connected to any flow path:")
+        for orphan_id in orphans:
+            lbl = shapes_by_id[orphan_id]["label"] or orphan_id
+            lines.append(f"  - {shapes_by_id[orphan_id]['hydro_type']} {lbl}")
+        lines.append("")  # optional blank line
+
     return "\n".join(lines)
 
 class ModelSummaryDialog(QDialog):
-    """
-    A dialog with a multiline text area for displaying/copying the imported model summary.
-    """
-
     def __init__(self, summary_text, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Model Summary")
+        self.summary_text = summary_text
+
         layout = QVBoxLayout()
 
         self.text_area = QPlainTextEdit()
@@ -212,12 +263,32 @@ class ModelSummaryDialog(QDialog):
         self.text_area.setPlainText(summary_text)
         layout.addWidget(self.text_area)
 
+        button_layout = QHBoxLayout()
+
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save_summary)
+        button_layout.addWidget(save_button)
+
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
-        layout.addWidget(close_button)
+        button_layout.addWidget(close_button)
 
+        layout.addLayout(button_layout)
         self.setLayout(layout)
         self.resize(800, 600)
+
+    def save_summary(self):
+        file_dialog = QFileDialog(self)
+        file_path, _ = file_dialog.getSaveFileName(
+            self, "Save Summary", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(self.summary_text)
+                QMessageBox.information(self, "Success", f"Summary saved to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error saving file:\n{e}")
 
 class UCIFileGeneratorApp(QMainWindow):
     def __init__(self):
