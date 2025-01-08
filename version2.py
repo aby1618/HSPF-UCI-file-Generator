@@ -1,42 +1,199 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QMessageBox,
-    QDialog, QFormLayout, QPlainTextEdit  # <-- Add QPlainTextEdit here
+    QDialog, QFormLayout, QPlainTextEdit
 )
 from PySide6.QtGui import Qt
 from PySide6.QtCore import QUrl
 import webbrowser
 import sys
 from lxml import etree
+import json
 
+# ----------------------------------------------------------------------
+# Part 1 + Part 2 Merged: Single SectionWindow Class
+# ----------------------------------------------------------------------
 class SectionWindow(QDialog):
-    def __init__(self, section_name, fields, pdf_base_url, parent_main):
-        super().__init__()
+    def __init__(
+        self,
+        section_name,
+        fields,
+        pdf_base_url,
+        parent_main,
+        initial_values=None
+    ):
+        super().__init__(parent_main)
         self.section_name = section_name
         self.fields = fields
-        self.pdf_base_url = pdf_base_url  # or fallback if None
+        self.pdf_base_url = pdf_base_url
         self.parent_main = parent_main
-        self.setWindowTitle(section_name)
-        self.layout = QFormLayout()
 
-        self.inputs = {}
-        for field_name, placeholder in fields.items():
+        if initial_values is None:
+            initial_values = {}
+
+        self.saved_data = {}
+        self.section_state = "empty"
+        self.setWindowTitle(f"{section_name} Section")
+
+        main_layout = QVBoxLayout(self)
+        self.input_fields = {}
+
+        # Create labeled fields + help buttons
+        for field_name, field_info in fields.items():
+            row_layout = QHBoxLayout()
+
             label = QLabel(field_name)
+            row_layout.addWidget(label)
+
             input_field = QLineEdit()
-            input_field.setPlaceholderText(placeholder)
-            self.layout.addRow(label, input_field)
-            self.inputs[field_name] = input_field
+            placeholder_text = (
+                field_info
+                if isinstance(field_info, str)
+                else field_info.get("placeholder", "")
+            )
+            input_field.setPlaceholderText(placeholder_text)
+
+            # Prepopulate if there's existing data
+            existing_val = initial_values.get(field_name, "")
+            input_field.setText(existing_val)
+
+            self.input_fields[field_name] = input_field
+            row_layout.addWidget(input_field)
+
+            # Info/help button
+            help_button = QPushButton("?")
+            help_button.setFixedWidth(30)
+
+            # If it's a dict, get help_text/pdf_page
+            if isinstance(field_info, dict):
+                ht = field_info.get("help_text", "")
+                pg = field_info.get("pdf_page", 1)
+                req = field_info.get("required", False)
+            else:
+                # The older sections like "FILES" might just have a placeholder string
+                ht = ""
+                pg = 1
+                req = False
+
+            help_button.clicked.connect(
+                lambda _, f=field_name, h=ht, p=pg: self.show_help(f, h, p)
+            )
+            row_layout.addWidget(help_button)
+
+            main_layout.addLayout(row_layout)
+
+            # Connect textChanged for dynamic enabling
+            input_field.textChanged.connect(self.on_field_changed)
+
+        # Preview + Save buttons
+        button_layout = QHBoxLayout()
+
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.setEnabled(False)
+        self.preview_button.clicked.connect(self.on_preview_clicked)
+        button_layout.addWidget(self.preview_button)
 
         self.save_button = QPushButton("Save")
-        self.save_button.clicked.connect(self.save)
-        self.layout.addWidget(self.save_button)
-        self.setLayout(self.layout)
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.on_save_clicked)
+        button_layout.addWidget(self.save_button)
 
-    def save(self):
-        # Gather all inputs and close the window
-        self.saved_data = {field: input_field.text() for field, input_field in self.inputs.items()}
-        QMessageBox.information(self, "Saved", "Data for the section has been saved.")
+        main_layout.addLayout(button_layout)
+        self.resize(600, 300)
+
+    def on_field_changed(self):
+        """Enable Save if at least one field is non-empty, enable Preview if all required fields are filled."""
+        required_filled = True
+        any_filled = False
+
+        for field_name, field_info in self.fields.items():
+            val = self.input_fields[field_name].text().strip()
+
+            # Some fields might be dict with "required", some might be just a string
+            if isinstance(field_info, dict):
+                req = field_info.get("required", False)
+            else:
+                req = False
+
+            if val:
+                any_filled = True
+            else:
+                if req:
+                    required_filled = False
+
+        self.save_button.setEnabled(any_filled)
+        self.preview_button.setEnabled(any_filled and required_filled)
+
+    def on_save_clicked(self):
+        """
+        Gather all fields, determine if partial or complete.
+        Then store in self.saved_data and accept() to close.
+        """
+        self.saved_data.clear()
+        filled_count = 0
+        required_count = 0
+        required_filled_count = 0
+
+        for field_name, field_info in self.fields.items():
+            val = self.input_fields[field_name].text().strip()
+            self.saved_data[field_name] = val
+
+            if isinstance(field_info, dict) and field_info.get("required", False):
+                required_count += 1
+                if val:
+                    required_filled_count += 1
+
+            if val:
+                filled_count += 1
+
+        if filled_count == 0:
+            self.section_state = "empty"
+        elif required_filled_count == required_count:
+            self.section_state = "complete"
+        else:
+            self.section_state = "partial"
+
+        if self.section_state == "partial":
+            QMessageBox.warning(
+                self,
+                "Incomplete Section",
+                "Not all required fields are filled.\n"
+                "You can still save, but the Preview won't be available unless all required fields are filled.",
+            )
+
         self.accept()
+
+    def on_preview_clicked(self):
+        """You can later replace this with a real preview window showing the formatted UCI lines."""
+        QMessageBox.information(
+            self,
+            "Preview",
+            f"This is a placeholder preview for section '{self.section_name}'."
+        )
+
+    def show_help(self, field_name, help_text, pdf_page):
+        """Pop-up for help + an optional link to the PDF at the specified page."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Help for {field_name}")
+        layout = QVBoxLayout(dialog)
+
+        info_label = QLabel()
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setOpenExternalLinks(True)
+
+        link_html = ""
+        if self.pdf_base_url:
+            link_html = (
+                f"<br><a href='{self.pdf_base_url}#page={pdf_page}' target='_blank'>Read more</a>"
+            )
+        info_label.setText(f"{help_text}{link_html}")
+        layout.addWidget(info_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+
+        dialog.exec()
 
 def parse_shapes(root):
     """
@@ -108,7 +265,6 @@ def parse_edges(root):
 
     return edges
 
-
 def build_graph(shapes_by_id, edges):
     """
     For each (src, tgt, style), add:
@@ -128,7 +284,6 @@ def build_graph(shapes_by_id, edges):
                 "source": src,
                 "flow_type": flow_type
             })
-
 
 def compute_branch_length(shapes_by_id, start_id, memo=None):
     """
@@ -297,191 +452,35 @@ class ModelSummaryDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error saving file:\n{e}")
 
-
-class SectionWindow(QDialog):
-    def __init__(self, section_name, fields, pdf_base_url, parent_main):
-        super().__init__()
-        self.section_name = section_name
-        self.fields = fields
-        self.pdf_base_url = pdf_base_url
-        self.parent_main = parent_main  # reference to UCIFileGeneratorApp, if needed
-
-        self.saved_data = {}  # we'll store final results here
-        self.section_state = "empty"  # will be "empty", "partial", or "complete"
-
-        self.setWindowTitle(f"{section_name} Section")
-
-        main_layout = QVBoxLayout(self)
-
-        # We'll store references to the QLineEdits so we can check them easily
-        self.input_fields = {}
-
-        # Create input rows
-        for field_name, field_info in fields.items():
-            row_layout = QHBoxLayout()
-
-            label = QLabel(field_name)
-            row_layout.addWidget(label)
-
-            input_field = QLineEdit()
-            placeholder_text = field_info.get("placeholder", "")
-            input_field.setPlaceholderText(placeholder_text)
-            self.input_fields[field_name] = input_field
-            row_layout.addWidget(input_field)
-
-            # Info/help button
-            help_button = QPushButton("?")
-            help_button.setFixedWidth(30)
-            ht = field_info.get("help_text", "")
-            pg = field_info.get("pdf_page", 1)
-            help_button.clicked.connect(lambda _, f=field_name, h=ht, p=pg: self.show_help(f, h, p))
-            row_layout.addWidget(help_button)
-
-            main_layout.addLayout(row_layout)
-
-            # Connect textChanged signal so we can enable/disable buttons dynamically
-            input_field.textChanged.connect(self.on_field_changed)
-
-        # Button layout
-        button_layout = QHBoxLayout()
-
-        # Preview button (disabled initially)
-        self.preview_button = QPushButton("Preview")
-        self.preview_button.setEnabled(False)
-        self.preview_button.clicked.connect(self.on_preview_clicked)
-        button_layout.addWidget(self.preview_button)
-
-        # Save button (disabled initially)
-        self.save_button = QPushButton("Save")
-        self.save_button.setEnabled(False)
-        self.save_button.clicked.connect(self.on_save_clicked)
-        button_layout.addWidget(self.save_button)
-
-        main_layout.addLayout(button_layout)
-
-        self.resize(500, 300)
-
-    def on_field_changed(self):
-        """Check if we should enable Save/Preview buttons based on required fields."""
-        required_filled = True
-        any_filled = False
-
-        for field_name, field_info in self.fields.items():
-            val = self.input_fields[field_name].text().strip()
-            req = field_info.get("required", False)
-
-            if val:
-                any_filled = True
-            else:
-                # It's empty
-                if req:
-                    required_filled = False
-
-        # Enable Save if there's at least one filled field
-        self.save_button.setEnabled(any_filled)
-
-        # Enable Preview if all required fields are filled
-        self.preview_button.setEnabled(required_filled and any_filled)
-
-    def on_save_clicked(self):
-        """
-        Gather all fields into self.saved_data,
-        determine section_state (empty, partial, complete),
-        then close the dialog (accept).
-        """
-        self.saved_data.clear()
-        filled_count = 0
-        required_count = 0
-        required_filled_count = 0
-
-        for field_name, field_info in self.fields.items():
-            val = self.input_fields[field_name].text().strip()
-            self.saved_data[field_name] = val
-
-            if field_info.get("required", False):
-                required_count += 1
-                if val:
-                    required_filled_count += 1
-
-            if val:
-                filled_count += 1
-
-        # Determine final state
-        if filled_count == 0:
-            self.section_state = "empty"
-        elif required_filled_count == required_count:
-            self.section_state = "complete"
-        else:
-            self.section_state = "partial"
-
-        # Optional: Show a warning if partial
-        if self.section_state == "partial":
-            QMessageBox.warning(self, "Incomplete Section",
-                "Not all required fields are filled.\n"
-                "You can still save, but you won't be able to Preview unless all required fields are filled.")
-
-        self.accept()  # closes the dialog
-
-    def on_preview_clicked(self):
-        """
-        In step 2, we'll just show a simple message.
-        In step 3, we'll show a proper preview dialog with formatted text.
-        """
-        QMessageBox.information(self, "Preview",
-            "This will eventually show the exact text for the UCI section.\n"
-            "All required fields are filled, so you can see a preview or proceed.")
-        # Later: We will implement a real preview window.
-
-    def show_help(self, field_name, help_text, pdf_page):
-        """Displays a help message with a link to the PDF if desired."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Help for {field_name}")
-        layout = QVBoxLayout(dialog)
-
-        info_label = QLabel()
-        info_label.setTextFormat(Qt.RichText)
-        info_label.setOpenExternalLinks(True)
-
-        link_html = ""
-        if self.pdf_base_url:
-            link_html = f"<br><a href='{self.pdf_base_url}#page={pdf_page}' target='_blank'>Read more</a>"
-        info_label.setText(f"{help_text}{link_html}")
-        layout.addWidget(info_label)
-
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.close)
-        layout.addWidget(close_button)
-
-        dialog.exec()
-
-    def save(self):
-        self.saved_data = {
-            field: input_field.text()
-            for field, input_field in self.inputs.items()
-        }
-        QMessageBox.information(self, "Saved", "Data for the section has been saved.")
-        self.accept()
-
+# ----------------------------------------------------------------------
+# The Main Application
+# ----------------------------------------------------------------------
 class UCIFileGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.pdf_base_url = "https://hydrologicmodels.tamu.edu/wp-content/uploads/sites/103/2018/09/HSPF_User-Manual.pdf"
+        self.pdf_base_url = (
+            "https://hydrologicmodels.tamu.edu/wp-content/uploads/sites/103/2018/09/HSPF_User-Manual.pdf"
+        )
         self.setWindowTitle("HSPF UCI File Generator")
         self.setGeometry(100, 100, 700, 500)
+
+        # For color updates, store section buttons
         self.section_buttons = {}
 
         # We'll store shapes by internal ID after importing the draw.io file
-        # Key: internal_id (string), Value: dictionary with "label", "hydro_type", "incoming", "outgoing"
         self.shapes_by_id = {}
 
-        # Create and set the central widget/layout
+        # We'll keep a dictionary to store all section data in memory.
+        # { "GLOBAL": { "Model Name": "xxx", ...}, "FILES": {...}, etc. }
+        self.section_data = {}
+
+        # Main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        # --- Section Buttons for each UCI section ---
-        # This is an example set; adapt to your needs
+        # Section Buttons
         self.add_section_button(main_layout, "GLOBAL",
                                 "Defines global simulation parameters.",
                                 self.global_section)
@@ -513,95 +512,30 @@ class UCIFileGeneratorApp(QMainWindow):
                                 "Defines flow relationships between elements.",
                                 self.network_section)
 
-        # --- Import/Show Model Buttons ---
+        # Import/Show Model Buttons
         import_layout = QHBoxLayout()
-
-        # Button to import a draw.io XML file
         self.import_button = QPushButton("Import Draw.io File")
         self.import_button.clicked.connect(self.import_drawio_file)
         import_layout.addWidget(self.import_button)
 
-        # Button to show the imported model summary
         self.show_model_button = QPushButton("Show Imported Model")
         self.show_model_button.clicked.connect(self.show_imported_model)
         import_layout.addWidget(self.show_model_button)
 
-        #change from here
-        # ------------------------------------------
-        # STEP 1: ADD "Load JSON" BUTTON + STORAGE
-        # ------------------------------------------
+        # Load/Save JSON
         self.load_json_button = QPushButton("Load JSON")
         self.load_json_button.clicked.connect(self.load_json_data)
         import_layout.addWidget(self.load_json_button)
 
-        # We'll keep a dictionary to store all section data in memory.
-        # Later steps will fill this dict and optionally save it to JSON.
-        self.section_data = {}  # { "GLOBAL": {field: value, ...}, "FILES": {...}, etc. }
-        #do not change from here
+        self.save_json_button = QPushButton("Save JSON")
+        self.save_json_button.clicked.connect(self.save_json_data)
+        import_layout.addWidget(self.save_json_button)
 
         main_layout.addLayout(import_layout)
 
-    def import_drawio_file(self):
-        file_dialog = QFileDialog(self)
-        xml_file, _ = file_dialog.getOpenFileName(self, "Select Draw.io XML", "", "XML Files (*.xml)")
-        if xml_file:
-            try:
-                tree = etree.parse(xml_file)
-                root = tree.getroot()
-
-                # 1) Parse shapes
-                self.shapes_by_id = parse_shapes(root)
-
-                # 2) Parse edges
-                edges = parse_edges(root)
-
-                # 3) Build connectivity
-                build_graph(self.shapes_by_id, edges)
-
-                QMessageBox.information(self, "Import Complete", "File parsed successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to parse XML:\n{e}")
-
-    def show_imported_model(self):
-        """
-        Display a summary of the recognized shapes in a new window,
-        using the new 'narrative_summary' approach.
-        """
-        if not self.shapes_by_id:
-            QMessageBox.warning(self, "No Data", "No model data has been imported yet.")
-            return
-
-        from functools import partial  # if needed, or not if we do not use it
-        summary = narrative_summary(self.shapes_by_id)
-        if not summary.strip():
-            summary = "No recognized connections."
-
-        dialog = ModelSummaryDialog(summary, self)
-        dialog.exec()
-
-    def load_json_data(self):
-        """
-        Opens a dialog to let the user pick a previously saved JSON,
-        then loads it into self.section_data (for later use).
-        """
-        file_dialog = QFileDialog(self)
-        json_file, _ = file_dialog.getOpenFileName(self, "Select JSON File", "", "JSON Files (*.json);;All Files (*)")
-        if not json_file:
-            return  # user canceled
-
-        try:
-            import json
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            # Store loaded data in memory
-            self.section_data = data if isinstance(data, dict) else {}
-
-            QMessageBox.information(self, "JSON Loaded", "Section data successfully loaded from JSON.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load JSON:\n{e}")
-
-    # Existing callback stubs for sections
+    # ---------------------------
+    # Utility: Add Section Button
+    # ---------------------------
     def add_section_button(self, layout, section_name, help_text, callback):
         section_layout = QHBoxLayout()
         section_button = QPushButton(section_name)
@@ -615,12 +549,121 @@ class UCIFileGeneratorApp(QMainWindow):
 
         self.section_buttons[section_name] = section_button
 
+    # ---------------------------
+    # Show Help
+    # ---------------------------
     def show_help(self, title, message):
         QMessageBox.information(self, title, message)
 
-    # Section callbacks
-    def global_section(self):
+    # -----------------------------------------
+    # Load JSON Data
+    # -----------------------------------------
+    def load_json_data(self):
+        file_dialog = QFileDialog(self)
+        json_file, _ = file_dialog.getOpenFileName(
+            self, "Select JSON File", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not json_file:
+            return  # user canceled
 
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.section_data = data if isinstance(data, dict) else {}
+            QMessageBox.information(
+                self, "JSON Loaded", "Section data successfully loaded from JSON."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load JSON:\n{e}")
+
+    # -----------------------------------------
+    # Save JSON Data
+    # -----------------------------------------
+    def save_json_data(self):
+        file_dialog = QFileDialog(self)
+        save_path, _ = file_dialog.getSaveFileName(
+            self, "Save JSON File", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not save_path:
+            return  # user canceled
+
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(self.section_data, f, indent=2)
+            QMessageBox.information(self, "Success", f"Data saved to {save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save JSON:\n{e}")
+
+    # -----------------------------------------
+    # Parse & Show Model
+    # -----------------------------------------
+    def import_drawio_file(self):
+        file_dialog = QFileDialog(self)
+        xml_file, _ = file_dialog.getOpenFileName(
+            self, "Select Draw.io XML", "", "XML Files (*.xml)"
+        )
+        if xml_file:
+            try:
+                tree = etree.parse(xml_file)
+                root = tree.getroot()
+                self.shapes_by_id = parse_shapes(root)
+                edges = parse_edges(root)
+                build_graph(self.shapes_by_id, edges)
+                QMessageBox.information(self, "Import Complete", "File parsed successfully.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to parse XML:\n{e}")
+
+    def show_imported_model(self):
+        if not self.shapes_by_id:
+            QMessageBox.warning(self, "No Data", "No model data has been imported yet.")
+            return
+        summary = narrative_summary(self.shapes_by_id)
+        if not summary.strip():
+            summary = "No recognized connections."
+
+        dialog = ModelSummaryDialog(summary, self)
+        dialog.exec()
+
+    # -----------------------------------------
+    # The MAIN open_section_window method
+    # -----------------------------------------
+    def open_section_window(self, section_name, fields):
+        """
+        Looks up existing data for 'section_name' in self.section_data,
+        passes it to SectionWindow. When the dialog closes, store changes
+        and update color.
+        """
+        existing_data = self.section_data.get(section_name, {})
+        window = SectionWindow(section_name, fields, self.pdf_base_url, self, existing_data)
+
+        if window.exec():
+            self.section_data[section_name] = window.saved_data
+
+            # Update button color
+            new_color = None
+            if window.section_state == "complete":
+                new_color = "green"
+            elif window.section_state == "partial":
+                new_color = "orange"
+            elif window.section_state == "empty":
+                new_color = None
+
+            self.set_section_button_color(section_name, new_color)
+
+    def set_section_button_color(self, section_name, color):
+        if section_name in self.section_buttons:
+            button = self.section_buttons[section_name]
+            if color is None:
+                button.setStyleSheet("")
+            else:
+                button.setStyleSheet(f"background-color: {color};")
+
+    # ---------------------------
+    # SECTION CALLBACKS
+    # ---------------------------
+    def global_section(self):
+        # For 'GLOBAL', let's define the fields as a dict with placeholders, etc.
         fields = {
             "Model Name": {
                 "placeholder": "Enter a descriptive name for the watershed/model run",
@@ -628,7 +671,8 @@ class UCIFileGeneratorApp(QMainWindow):
                     "This name or description will appear under the GLOBAL block in the UCI file. "
                     "It identifies your watershed or scenario."
                 ),
-                "pdf_page": 28
+                "pdf_page": 28,
+                "required": True
             },
             "Start Date (YYYY/MM/DD)": {
                 "placeholder": "Enter the simulation start date",
@@ -636,7 +680,8 @@ class UCIFileGeneratorApp(QMainWindow):
                     "HSPF will begin its simulation on this date. "
                     "Make sure it aligns with your input data availability."
                 ),
-                "pdf_page": 29
+                "pdf_page": 29,
+                "required": True
             },
             "End Date (YYYY/MM/DD)": {
                 "placeholder": "Enter the simulation end date",
@@ -644,7 +689,8 @@ class UCIFileGeneratorApp(QMainWindow):
                     "HSPF will end its simulation on this date. "
                     "Again, ensure data is available up to this date."
                 ),
-                "pdf_page": 29
+                "pdf_page": 29,
+                "required": True
             },
             "Run/Interp/Output Level": {
                 "placeholder": "e.g., RUN INTERP OUTPUT LEVEL    3",
@@ -654,7 +700,8 @@ class UCIFileGeneratorApp(QMainWindow):
                     " - 'INTERP' means timeseries data is interpolated\n"
                     " - 'OUTPUT LEVEL' controls detail in output (0..5)."
                 ),
-                "pdf_page": 30
+                "pdf_page": 30,
+                "required": True
             },
             "Resume / Run": {
                 "placeholder": "e.g., RESUME     0 RUN     1",
@@ -663,7 +710,8 @@ class UCIFileGeneratorApp(QMainWindow):
                     "'RUN 1' is the run ID. If continuing an older run,\n"
                     "you might set 'RESUME 1 RUN 2', etc."
                 ),
-                "pdf_page": 30
+                "pdf_page": 30,
+                "required": True
             },
             "Unit System": {
                 "placeholder": "1 = English, 2 = SI Metric",
@@ -672,95 +720,14 @@ class UCIFileGeneratorApp(QMainWindow):
                     "1 = English (inch, foot)\n"
                     "2 = Metric (mm, m, etc.)"
                 ),
-                "pdf_page": 31
+                "pdf_page": 31,
+                "required": True
             }
         }
-
         self.open_section_window("GLOBAL", fields)
 
-    def open_section_window(self, section_name, fields, pdf_base_url=None):
-        # We add an argument 'section_name' to the SectionWindow so it knows which section it is.
-        window = SectionWindow(section_name, fields, self.pdf_base_url, self)
-        if window.exec():
-            # The dialog was accepted (i.e. user clicked Save)
-            # 'window.saved_data' contains all field entries
-            # 'window.section_state' is "complete", "partial", or "empty"
-
-            # We'll store it in self.section_data under the correct key
-            self.section_data[section_name] = window.saved_data
-
-            # Update the main window's button color
-            new_color = None
-            if window.section_state == "complete":
-                new_color = "green"
-            elif window.section_state == "partial":
-                new_color = "orange"
-            elif window.section_state == "empty":
-                new_color = None  # default
-
-            # We have a helper function to recolor the section button
-            self.set_section_button_color(section_name, new_color)
-
-    # Add this helper to set the color of the section button:
-    def set_section_button_color(self, section_name, color):
-        """
-        Finds the button in the main layout that matches 'section_name'
-        and changes its background color.
-        """
-        # For simplicity, let's store references to buttons in a dictionary
-        # in the add_section_button method. We'll do that next.
-        if section_name in self.section_buttons:
-            button = self.section_buttons[section_name]
-            if color is None:
-                # reset to default
-                button.setStyleSheet("")
-            else:
-                button.setStyleSheet(f"background-color: {color};")
-
-    def generate_global_section(global_data):
-        """
-        Generates the GLOBAL section as a list of lines (strings)
-        with exact spacing and formatting, matching your sample.
-
-        global_data keys:
-            "model_name", "start_date", "end_date",
-            "run_interp_output_level", "resume_run", "unit_system"
-        """
-        lines = []
-
-        # Optional: add a comment line if you want
-        lines.append("*** GLOBAL PARAMETERS ***")
-
-        # 1) "GLOBAL"
-        lines.append("GLOBAL")
-
-        # 2) Two-space indent + model_name
-        model_name = global_data.get("model_name", "").strip()
-        lines.append(f"  {model_name}")
-
-        # 3) Start/End line
-        start_date = global_data.get("start_date", "")
-        end_date = global_data.get("end_date", "")
-        # Adjust spacing as desired:
-        lines.append(f"  START       {start_date:<16}END    {end_date}")
-
-        # 4) RUN/INTERP/OUTPUT LEVEL
-        run_interp_output_level = global_data.get("run_interp_output_level", "RUN INTERP OUTPUT LEVEL    3")
-        lines.append(f"  {run_interp_output_level}")
-
-        # 5) RESUME / RUN + UNIT SYSTEM
-        resume_run = global_data.get("resume_run", "RESUME     0 RUN     1")
-        # Left-justify it so that "UNIT SYSTEM" lines up at column ~35
-        resume_run_str = f"{resume_run:<32}"
-        unit_system = global_data.get("unit_system", 2)
-        lines.append(f"  {resume_run_str}UNIT SYSTEM     {unit_system}")
-
-        # 6) "END GLOBAL"
-        lines.append("END GLOBAL")
-
-        return lines
-
     def files_section(self):
+        # For a simpler section, you can keep it as just placeholders
         fields = {
             "WDM1 File Name": "Enter the first WDM file name (e.g., CONMET.WDM)",
             "WDM2 File Name": "Enter the second WDM file name (e.g., CONOUT.WDM)"
@@ -815,12 +782,37 @@ class UCIFileGeneratorApp(QMainWindow):
         }
         self.open_section_window("NETWORK", fields)
 
-    def open_section_window(self, section_name, fields):
-        window = SectionWindow(section_name, fields, self.pdf_base_url, self)
-        if window.exec():
-            # window.saved_data now contains everything the user typed in
-            print(f"Data for {section_name}:", window.saved_data)
 
+# If you want a function to generate the final GLOBAL text, do it outside or as a method
+def generate_global_section(global_data):
+    """
+    Example function to format a GLOBAL section with alignment.
+    You'd call this after the user has fully filled out global_data.
+    """
+    lines = []
+    lines.append("*** GLOBAL PARAMETERS ***")
+    lines.append("GLOBAL")
+    model_name = global_data.get("Model Name", "").strip()
+    lines.append(f"  {model_name}")
+
+    start_date = global_data.get("Start Date (YYYY/MM/DD)", "")
+    end_date = global_data.get("End Date (YYYY/MM/DD)", "")
+    lines.append(f"  START       {start_date:<16}END    {end_date}")
+
+    run_interp_output_level = global_data.get("Run/Interp/Output Level", "RUN INTERP OUTPUT LEVEL    3")
+    lines.append(f"  {run_interp_output_level}")
+
+    resume_run = global_data.get("Resume / Run", "RESUME     0 RUN     1")
+    resume_run_str = f"{resume_run:<32}"
+    unit_system = global_data.get("Unit System", 2)
+    lines.append(f"  {resume_run_str}UNIT SYSTEM     {unit_system}")
+    lines.append("END GLOBAL")
+    return lines
+
+
+# ----------------------------------------------------------------------
+# Launch
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = UCIFileGeneratorApp()
