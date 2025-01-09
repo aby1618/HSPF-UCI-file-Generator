@@ -1,18 +1,18 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QMessageBox,
-    QDialog, QFormLayout, QPlainTextEdit
+    QDialog, QFormLayout, QPlainTextEdit, QDateEdit
 )
 from PySide6.QtGui import Qt
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QDate
 import webbrowser
 import sys
 from lxml import etree
 import json
 
-# ----------------------------------------------------------------------
-# Part 1 + Part 2 Merged: Single SectionWindow Class
-# ----------------------------------------------------------------------
+# -------------------------------------------------------
+# SectionWindow: Handles one UCI section (GLOBAL, FILES, etc.)
+# -------------------------------------------------------
 class SectionWindow(QDialog):
     def __init__(
         self,
@@ -32,9 +32,9 @@ class SectionWindow(QDialog):
             initial_values = {}
 
         self.saved_data = {}
-        self.section_state = "empty"
-        self.setWindowTitle(f"{section_name} Section")
+        self.section_state = "empty"  # can be "empty", "partial", or "complete"
 
+        self.setWindowTitle(f"{section_name} Section")
         main_layout = QVBoxLayout(self)
         self.input_fields = {}
 
@@ -45,17 +45,51 @@ class SectionWindow(QDialog):
             label = QLabel(field_name)
             row_layout.addWidget(label)
 
-            input_field = QLineEdit()
-            placeholder_text = (
-                field_info
-                if isinstance(field_info, str)
-                else field_info.get("placeholder", "")
-            )
-            input_field.setPlaceholderText(placeholder_text)
+            # Determine if it's a date field
+            is_date_field = False
+            placeholder_text = ""
 
-            # Prepopulate if there's existing data
+            # If fields is a dict, we might have "required", "help_text", "is_date", etc.
+            if isinstance(field_info, dict):
+                placeholder_text = field_info.get("placeholder", "")
+                is_date_field = field_info.get("is_date", False)
+            elif isinstance(field_info, str):
+                placeholder_text = field_info
+
             existing_val = initial_values.get(field_name, "")
-            input_field.setText(existing_val)
+
+            if is_date_field:
+                # Use QDateEdit for date fields
+                date_edit = QDateEdit(self)
+                date_edit.setCalendarPopup(True)
+                date_edit.setDisplayFormat("yyyy/MM/dd")
+
+                # QDateEdit doesn't implement setPlaceholderText,
+                # but we can set it on its internal lineEdit()
+                date_edit.lineEdit().setPlaceholderText(placeholder_text)
+
+                # Attempt to parse existing_val (YYYY/MM/DD)
+                parts = existing_val.split("/")
+                if len(parts) == 3:
+                    y, m, d = parts
+                    try:
+                        date_obj = QDate(int(y), int(m), int(d))
+                        if date_obj.isValid():
+                            date_edit.setDate(date_obj)
+                    except:
+                        pass
+
+                input_field = date_edit
+                # Connect dateChanged for dynamic enable
+                date_edit.dateChanged.connect(lambda _: self.on_field_changed())
+
+            else:
+                # Normal QLineEdit
+                line_edit = QLineEdit(self)
+                line_edit.setText(existing_val)
+                line_edit.setPlaceholderText(placeholder_text)
+                input_field = line_edit
+                input_field.textChanged.connect(self.on_field_changed)
 
             self.input_fields[field_name] = input_field
             row_layout.addWidget(input_field)
@@ -64,13 +98,12 @@ class SectionWindow(QDialog):
             help_button = QPushButton("?")
             help_button.setFixedWidth(30)
 
-            # If it's a dict, get help_text/pdf_page
+            # For dict fields, gather help_text, pdf_page, and "required" if needed
             if isinstance(field_info, dict):
                 ht = field_info.get("help_text", "")
                 pg = field_info.get("pdf_page", 1)
                 req = field_info.get("required", False)
             else:
-                # The older sections like "FILES" might just have a placeholder string
                 ht = ""
                 pg = 1
                 req = False
@@ -82,16 +115,17 @@ class SectionWindow(QDialog):
 
             main_layout.addLayout(row_layout)
 
-            # Connect textChanged for dynamic enabling
-            input_field.textChanged.connect(self.on_field_changed)
-
-        # Preview + Save buttons
+        # Bottom row of buttons: Preview, Reset, Save
         button_layout = QHBoxLayout()
 
         self.preview_button = QPushButton("Preview")
         self.preview_button.setEnabled(False)
         self.preview_button.clicked.connect(self.on_preview_clicked)
         button_layout.addWidget(self.preview_button)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self.on_reset_clicked)
+        button_layout.addWidget(self.reset_button)
 
         self.save_button = QPushButton("Save")
         self.save_button.setEnabled(False)
@@ -102,32 +136,94 @@ class SectionWindow(QDialog):
         self.resize(600, 300)
 
     def on_field_changed(self):
-        """Enable Save if at least one field is non-empty, enable Preview if all required fields are filled."""
+        """
+        Check if there's at least one filled field (-> enable Save),
+        and if all required fields are filled (-> enable Preview).
+        """
         required_filled = True
         any_filled = False
 
         for field_name, field_info in self.fields.items():
-            val = self.input_fields[field_name].text().strip()
+            widget = self.input_fields[field_name]
 
-            # Some fields might be dict with "required", some might be just a string
-            if isinstance(field_info, dict):
-                req = field_info.get("required", False)
+            # Extract the current value
+            if isinstance(widget, QDateEdit):
+                val = widget.date().toString("yyyy/MM/dd").strip()
             else:
-                req = False
+                val = widget.text().strip()
 
             if val:
                 any_filled = True
-            else:
-                if req:
+
+            # If it's a required field, check emptiness
+            if isinstance(field_info, dict) and field_info.get("required", False):
+                if not val:
                     required_filled = False
 
         self.save_button.setEnabled(any_filled)
         self.preview_button.setEnabled(any_filled and required_filled)
 
+    def on_preview_clicked(self):
+        """
+        Build a multiline text from the user's current field values,
+        then display it in a dialog. If it's GLOBAL, we use
+        generate_global_section_text. Otherwise, we do a placeholder.
+        """
+        # Gather current user inputs
+        data_dict = {}
+        for field_name, widget in self.input_fields.items():
+            if isinstance(widget, QDateEdit):
+                data_dict[field_name] = widget.date().toString("yyyy/MM/dd")
+            else:
+                data_dict[field_name] = widget.text().strip()
+
+        # If this is the GLOBAL section, produce real text
+        if self.section_name == "GLOBAL":
+            preview_text = generate_global_section_text(data_dict)
+        else:
+            # Placeholder for other sections
+            # You can implement a real function for each if you like
+            preview_text = f"[Preview not implemented for '{self.section_name}']"
+
+        # Show the preview in a simple QDialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Preview: {self.section_name}")
+        layout = QVBoxLayout(dialog)
+
+        text_area = QPlainTextEdit()
+        text_area.setReadOnly(True)
+        text_area.setPlainText(preview_text)
+        layout.addWidget(text_area)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+
+        dialog.exec()
+
+    def on_reset_clicked(self):
+        """
+        Clears all fields in this section (makes them empty),
+        sets section_state to 'empty', and resets color in main window.
+        """
+        for field_name, widget in self.input_fields.items():
+            if isinstance(widget, QDateEdit):
+                widget.lineEdit().clear()
+            else:
+                widget.clear()
+
+        self.section_state = "empty"
+        self.preview_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+
+        if hasattr(self.parent_main, "set_section_button_color"):
+            self.parent_main.set_section_button_color(self.section_name, None)
+
     def on_save_clicked(self):
         """
-        Gather all fields, determine if partial or complete.
-        Then store in self.saved_data and accept() to close.
+        Copies all field data into self.saved_data,
+        determines if the section is empty, partial, or complete,
+        warns if partial, then closes.
         """
         self.saved_data.clear()
         filled_count = 0
@@ -135,9 +231,15 @@ class SectionWindow(QDialog):
         required_filled_count = 0
 
         for field_name, field_info in self.fields.items():
-            val = self.input_fields[field_name].text().strip()
+            widget = self.input_fields[field_name]
+            if isinstance(widget, QDateEdit):
+                val = widget.date().toString("yyyy/MM/dd")
+            else:
+                val = widget.text().strip()
+
             self.saved_data[field_name] = val
 
+            # Count required fields
             if isinstance(field_info, dict) and field_info.get("required", False):
                 required_count += 1
                 if val:
@@ -163,16 +265,10 @@ class SectionWindow(QDialog):
 
         self.accept()
 
-    def on_preview_clicked(self):
-        """You can later replace this with a real preview window showing the formatted UCI lines."""
-        QMessageBox.information(
-            self,
-            "Preview",
-            f"This is a placeholder preview for section '{self.section_name}'."
-        )
-
     def show_help(self, field_name, help_text, pdf_page):
-        """Pop-up for help + an optional link to the PDF at the specified page."""
+        """
+        Shows a small QDialog with help text and an optional link to the PDF.
+        """
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Help for {field_name}")
         layout = QVBoxLayout(dialog)
@@ -183,9 +279,7 @@ class SectionWindow(QDialog):
 
         link_html = ""
         if self.pdf_base_url:
-            link_html = (
-                f"<br><a href='{self.pdf_base_url}#page={pdf_page}' target='_blank'>Read more</a>"
-            )
+            link_html = f"<br><a href='{self.pdf_base_url}#page={pdf_page}' target='_blank'>Read more</a>"
         info_label.setText(f"{help_text}{link_html}")
         layout.addWidget(info_label)
 
@@ -195,16 +289,11 @@ class SectionWindow(QDialog):
 
         dialog.exec()
 
+
+# -------------------------------------------------------
+# Functions for Parsing the Diagram and Summaries
+# -------------------------------------------------------
 def parse_shapes(root):
-    """
-    Parse <mxCell vertex="1"> elements, classify them by style:
-      - ellipse;...       => Subcatchment
-      - shape=hexagon;... => RCHRES
-      - shape=waypoint;... => Node
-      - triangle;...      => SWM Facility
-    If none match, we store as 'Comment/Note'.
-    Returns { internal_id: { ... }, ... }
-    """
     shapes_by_id = {}
     shape_cells = root.xpath(".//mxCell[@vertex='1']")
     for cell in shape_cells:
@@ -216,8 +305,6 @@ def parse_shapes(root):
             continue
 
         recognized = False
-        # Classification by style
-        # We'll do if/elif to avoid conflicting matches
         if "ellipse;" in style:
             hydro_type = "Subcatchment"
             recognized = True
@@ -233,10 +320,8 @@ def parse_shapes(root):
         else:
             hydro_type = "Comment/Note"
 
-        # Optional: produce a debug print or store a "warning" if not recognized
         if not recognized:
-            print(
-                f"WARNING: Shape with ID {internal_id} and style='{style}' was not recognized; treating as Comment/Note.")
+            print(f"WARNING: Shape ID {internal_id} style '{style}' not recognized; using Comment/Note.")
 
         shapes_by_id[internal_id] = {
             "id": internal_id,
@@ -245,14 +330,9 @@ def parse_shapes(root):
             "incoming": [],
             "outgoing": []
         }
-
     return shapes_by_id
 
 def parse_edges(root):
-    """
-    Parse <mxCell edge="1"> elements, gather source/target/style.
-    Returns a list of (src_id, tgt_id, style).
-    """
     edges = []
     edge_cells = root.xpath(".//mxCell[@edge='1']")
     for cell in edge_cells:
@@ -262,34 +342,16 @@ def parse_edges(root):
 
         if src_id and tgt_id:
             edges.append((src_id, tgt_id, style))
-
     return edges
 
 def build_graph(shapes_by_id, edges):
-    """
-    For each (src, tgt, style), add:
-        src -> tgt to 'outgoing'
-        tgt -> src to 'incoming'
-    Distinguish dashed=1 (Groundwater) vs. solid (Surface).
-    """
     for (src, tgt, style) in edges:
         if src in shapes_by_id and tgt in shapes_by_id:
             flow_type = "Groundwater" if "dashed=1" in style else "Surface"
-
-            shapes_by_id[src]["outgoing"].append({
-                "target": tgt,
-                "flow_type": flow_type
-            })
-            shapes_by_id[tgt]["incoming"].append({
-                "source": src,
-                "flow_type": flow_type
-            })
+            shapes_by_id[src]["outgoing"].append({"target": tgt, "flow_type": flow_type})
+            shapes_by_id[tgt]["incoming"].append({"source": src, "flow_type": flow_type})
 
 def compute_branch_length(shapes_by_id, start_id, memo=None):
-    """
-    Returns the maximum depth from 'start_id' down to any leaf.
-    This helps us prioritize outflows from longest to shortest branch.
-    """
     if memo is None:
         memo = {}
     if start_id in memo:
@@ -310,25 +372,15 @@ def compute_branch_length(shapes_by_id, start_id, memo=None):
     return memo[start_id]
 
 def narrative_summary(shapes_by_id):
-    """
-    Builds a multiline text summary such that:
-      - When we handle "ShapeA → NodeX", we immediately look for other feeders into NodeX
-        and list them too, before we move on to "NodeX → ???".
-      - This yields a continuous 'chain' of lines, so the same node (e.g., NodeX) appears
-        consecutively for all incoming lines, then we show NodeX's own outflow.
-    """
-
     visited_lines = set()
     visited_targets = set()
     lines = []
 
-    # Precompute branch lengths for each shape
     memo_lengths = {}
     for sid in shapes_by_id:
         compute_branch_length(shapes_by_id, sid, memo_lengths)
 
     def add_line(source_id, target_id, flow_type):
-        """Add a line 'Source discharges (Surface/Groundwater) to Target' if not visited."""
         line_key = (source_id, target_id, flow_type)
         if line_key in visited_lines:
             return
@@ -341,48 +393,37 @@ def narrative_summary(shapes_by_id):
         tgt_type = target_data["hydro_type"]
         tgt_label = target_data["label"] or target_id
 
-        flow_text = "(Surface)" if flow_type == "Surface" else "(Groundwater)"
-        lines.append(f"{src_type} {src_label} discharges {flow_text} to {tgt_type} {tgt_label}.")
+        flow_txt = "(Surface)" if flow_type == "Surface" else "(Groundwater)"
+        lines.append(f"{src_type} {src_label} discharges {flow_txt} to {tgt_type} {tgt_label}.")
 
-    def process_target(target_id):
-        # If we've already fully processed this shape, skip
-        if target_id in visited_targets:
+    def process_target(tid):
+        if tid in visited_targets:
             return
+        for inc_dict in shapes_by_id[tid]["incoming"]:
+            inc_id = inc_dict["source"]
+            fl_type = inc_dict["flow_type"]
+            if (inc_id, tid, fl_type) not in visited_lines:
+                process_target(inc_id)
+                add_line(inc_id, tid, fl_type)
 
-        # (1) Process all incoming feeders first (they might not have been processed yet).
-        for inc_dict in shapes_by_id[target_id]["incoming"]:
-            incoming_id = inc_dict["source"]
-            flow_type = inc_dict["flow_type"]
-
-            line_key = (incoming_id, target_id, flow_type)
-            if line_key not in visited_lines:
-                process_target(incoming_id)
-                add_line(incoming_id, target_id, flow_type)
-
-        # (2) Sort outgoings by descending branch length
-        outgoings = shapes_by_id[target_id]["outgoing"]
+        outgoings = shapes_by_id[tid]["outgoing"]
         if not outgoings:
-            # No outflow
-            data = shapes_by_id[target_id]
+            data = shapes_by_id[tid]
             if data["hydro_type"] != "Comment/Note":
-                # Print "does not discharge..." only once
                 lines.append(f"{data['hydro_type']} {data['label']} does not discharge to any recognized element.")
         else:
-            # Sort by descending branch length
-            outgoings_sorted = sorted(
-                outgoings,
-                key=lambda od: memo_lengths[od["target"]],
-                reverse=True
+            out_sorted = sorted(
+                outgoings, key=lambda od: memo_lengths[od["target"]], reverse=True
             )
-            for out_dict in outgoings_sorted:
-                nxt_id = out_dict["target"]
-                flow_type = out_dict["flow_type"]
-                add_line(target_id, nxt_id, flow_type)
+            for outd in out_sorted:
+                nxt_id = outd["target"]
+                fl_type = outd["flow_type"]
+                add_line(tid, nxt_id, fl_type)
                 process_target(nxt_id)
 
-        visited_targets.add(target_id)
+        visited_targets.add(tid)
 
-    # MAIN LOGIC
+    # Start with shapes that have no incoming edges
     start_shapes = [
         sid for sid, data in shapes_by_id.items()
         if data["hydro_type"] != "Comment/Note" and not data["incoming"]
@@ -390,25 +431,21 @@ def narrative_summary(shapes_by_id):
     for s_id in start_shapes:
         process_target(s_id)
 
-    # If any shapes remain unvisited (possibly orphaned or merges), process them
     for sid in shapes_by_id:
         if sid not in visited_targets:
             process_target(sid)
 
-    # --------------------------------------------------
-    # HIGHLIGHT ORPHANS HERE, before returning the lines
-    # --------------------------------------------------
+    # highlight orphans
     orphans = []
     for sid, data in shapes_by_id.items():
         if not data["incoming"] and not data["outgoing"] and data["hydro_type"] != "Comment/Note":
             orphans.append(sid)
-
     if orphans:
         lines.append("The following shapes are not connected to any flow path:")
-        for orphan_id in orphans:
-            lbl = shapes_by_id[orphan_id]["label"] or orphan_id
-            lines.append(f"  - {shapes_by_id[orphan_id]['hydro_type']} {lbl}")
-        lines.append("")  # optional blank line
+        for o_id in orphans:
+            lbl = shapes_by_id[o_id]["label"] or o_id
+            lines.append(f"  - {shapes_by_id[o_id]['hydro_type']} {lbl}")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -421,7 +458,7 @@ class ModelSummaryDialog(QDialog):
         layout = QVBoxLayout()
 
         self.text_area = QPlainTextEdit()
-        self.text_area.setReadOnly(False)  # allow user to copy
+        self.text_area.setReadOnly(True)
         self.text_area.setPlainText(summary_text)
         layout.addWidget(self.text_area)
 
@@ -452,9 +489,10 @@ class ModelSummaryDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error saving file:\n{e}")
 
-# ----------------------------------------------------------------------
-# The Main Application
-# ----------------------------------------------------------------------
+
+# -------------------------------------------------------
+# UCIFileGeneratorApp: Main Window
+# -------------------------------------------------------
 class UCIFileGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -464,23 +502,16 @@ class UCIFileGeneratorApp(QMainWindow):
         self.setWindowTitle("HSPF UCI File Generator")
         self.setGeometry(100, 100, 700, 500)
 
-        # For color updates, store section buttons
         self.section_buttons = {}
-
-        # We'll store shapes by internal ID after importing the draw.io file
         self.shapes_by_id = {}
+        self.section_data = {}  # e.g. {"GLOBAL": {...}, "FILES": {...}}
 
-        # We'll keep a dictionary to store all section data in memory.
-        # { "GLOBAL": { "Model Name": "xxx", ...}, "FILES": {...}, etc. }
-        self.section_data = {}
-
-        # Main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
-        # Section Buttons
+        # Add buttons for each section
         self.add_section_button(main_layout, "GLOBAL",
                                 "Defines global simulation parameters.",
                                 self.global_section)
@@ -488,16 +519,16 @@ class UCIFileGeneratorApp(QMainWindow):
                                 "Specifies file names for input and output.",
                                 self.files_section)
         self.add_section_button(main_layout, "OPN SEQUENCE",
-                                "Defines the operation sequence for the simulation.",
+                                "Defines the operation sequence.",
                                 self.opn_sequence_section)
         self.add_section_button(main_layout, "PERLND",
-                                "Specifies parameters for pervious land areas.",
+                                "Parameters for pervious land areas.",
                                 self.perlnd_section)
         self.add_section_button(main_layout, "IMPLND",
-                                "Specifies parameters for impervious land areas.",
+                                "Parameters for impervious land areas.",
                                 self.implnd_section)
         self.add_section_button(main_layout, "RCHRES",
-                                "Defines routing for reaches and reservoirs.",
+                                "Routing for reaches/reservoirs.",
                                 self.rchres_section)
         self.add_section_button(main_layout, "FTABLES",
                                 "Specifies tables for flow routing.",
@@ -509,10 +540,10 @@ class UCIFileGeneratorApp(QMainWindow):
                                 "Specifies targets for external inputs.",
                                 self.ext_targets_section)
         self.add_section_button(main_layout, "NETWORK",
-                                "Defines flow relationships between elements.",
+                                "Defines flow relationships.",
                                 self.network_section)
 
-        # Import/Show Model Buttons
+        # Import/Show Model + JSON load/save
         import_layout = QHBoxLayout()
         self.import_button = QPushButton("Import Draw.io File")
         self.import_button.clicked.connect(self.import_drawio_file)
@@ -522,7 +553,6 @@ class UCIFileGeneratorApp(QMainWindow):
         self.show_model_button.clicked.connect(self.show_imported_model)
         import_layout.addWidget(self.show_model_button)
 
-        # Load/Save JSON
         self.load_json_button = QPushButton("Load JSON")
         self.load_json_button.clicked.connect(self.load_json_data)
         import_layout.addWidget(self.load_json_button)
@@ -533,9 +563,9 @@ class UCIFileGeneratorApp(QMainWindow):
 
         main_layout.addLayout(import_layout)
 
-    # ---------------------------
-    # Utility: Add Section Button
-    # ---------------------------
+    # ------------------------------------------------
+    # Add a section button (with a help "?") to the UI
+    # ------------------------------------------------
     def add_section_button(self, layout, section_name, help_text, callback):
         section_layout = QHBoxLayout()
         section_button = QPushButton(section_name)
@@ -549,14 +579,11 @@ class UCIFileGeneratorApp(QMainWindow):
 
         self.section_buttons[section_name] = section_button
 
-    # ---------------------------
-    # Show Help
-    # ---------------------------
     def show_help(self, title, message):
         QMessageBox.information(self, title, message)
 
     # -----------------------------------------
-    # Load JSON Data
+    # JSON Load/Save
     # -----------------------------------------
     def load_json_data(self):
         file_dialog = QFileDialog(self)
@@ -564,29 +591,23 @@ class UCIFileGeneratorApp(QMainWindow):
             self, "Select JSON File", "", "JSON Files (*.json);;All Files (*)"
         )
         if not json_file:
-            return  # user canceled
+            return
 
         try:
             with open(json_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             self.section_data = data if isinstance(data, dict) else {}
-            QMessageBox.information(
-                self, "JSON Loaded", "Section data successfully loaded from JSON."
-            )
+            QMessageBox.information(self, "JSON Loaded", "Section data loaded from JSON.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load JSON:\n{e}")
 
-    # -----------------------------------------
-    # Save JSON Data
-    # -----------------------------------------
     def save_json_data(self):
         file_dialog = QFileDialog(self)
         save_path, _ = file_dialog.getSaveFileName(
             self, "Save JSON File", "", "JSON Files (*.json);;All Files (*)"
         )
         if not save_path:
-            return  # user canceled
+            return
 
         try:
             with open(save_path, "w", encoding="utf-8") as f:
@@ -596,7 +617,7 @@ class UCIFileGeneratorApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save JSON:\n{e}")
 
     # -----------------------------------------
-    # Parse & Show Model
+    # Import & Show Model
     # -----------------------------------------
     def import_drawio_file(self):
         file_dialog = QFileDialog(self)
@@ -621,31 +642,28 @@ class UCIFileGeneratorApp(QMainWindow):
         summary = narrative_summary(self.shapes_by_id)
         if not summary.strip():
             summary = "No recognized connections."
-
         dialog = ModelSummaryDialog(summary, self)
         dialog.exec()
 
     # -----------------------------------------
-    # The MAIN open_section_window method
+    # Open a Section Window
     # -----------------------------------------
     def open_section_window(self, section_name, fields):
-        """
-        Looks up existing data for 'section_name' in self.section_data,
-        passes it to SectionWindow. When the dialog closes, store changes
-        and update color.
-        """
+        # Check if there's existing data for this section
         existing_data = self.section_data.get(section_name, {})
-        window = SectionWindow(section_name, fields, self.pdf_base_url, self, existing_data)
 
+        # Create a new SectionWindow
+        window = SectionWindow(section_name, fields, self.pdf_base_url, self, existing_data)
         if window.exec():
+            # If user clicked Save, store updated data
             self.section_data[section_name] = window.saved_data
 
-            # Update button color
+            # Update color based on final state
             new_color = None
             if window.section_state == "complete":
-                new_color = "green"
+                new_color = "limegreen"
             elif window.section_state == "partial":
-                new_color = "orange"
+                new_color = "darkorange"
             elif window.section_state == "empty":
                 new_color = None
 
@@ -657,69 +675,54 @@ class UCIFileGeneratorApp(QMainWindow):
             if color is None:
                 button.setStyleSheet("")
             else:
-                button.setStyleSheet(f"background-color: {color};")
+                button.setStyleSheet(f"background-color: {color}; color: black;")
 
-    # ---------------------------
-    # SECTION CALLBACKS
-    # ---------------------------
+    # -----------------------------------------
+    # Section Callbacks
+    # -----------------------------------------
     def global_section(self):
-        # For 'GLOBAL', let's define the fields as a dict with placeholders, etc.
         fields = {
             "Model Name": {
                 "placeholder": "Enter a descriptive name for the watershed/model run",
-                "help_text": (
-                    "This name or description will appear under the GLOBAL block in the UCI file. "
-                    "It identifies your watershed or scenario."
-                ),
+                "help_text": "This appears under GLOBAL in the UCI.",
                 "pdf_page": 28,
                 "required": True
             },
             "Start Date (YYYY/MM/DD)": {
-                "placeholder": "Enter the simulation start date",
-                "help_text": (
-                    "HSPF will begin its simulation on this date. "
-                    "Make sure it aligns with your input data availability."
-                ),
+                "placeholder": "YYYY/MM/DD",
+                "help_text": "Simulation start date.",
                 "pdf_page": 29,
-                "required": True
+                "required": True,
+                "is_date": True
             },
             "End Date (YYYY/MM/DD)": {
-                "placeholder": "Enter the simulation end date",
-                "help_text": (
-                    "HSPF will end its simulation on this date. "
-                    "Again, ensure data is available up to this date."
-                ),
+                "placeholder": "YYYY/MM/DD",
+                "help_text": "Simulation end date.",
                 "pdf_page": 29,
-                "required": True
+                "required": True,
+                "is_date": True
             },
             "Run/Interp/Output Level": {
-                "placeholder": "e.g., RUN INTERP OUTPUT LEVEL    3",
-                "help_text": (
-                    "Specifies how HSPF will run.\n"
-                    " - 'RUN' vs 'RESUME' (fresh vs. continue)\n"
-                    " - 'INTERP' means timeseries data is interpolated\n"
-                    " - 'OUTPUT LEVEL' controls detail in output (0..5)."
-                ),
+                "placeholder": "RUN INTERP OUTPUT LEVEL    3",
+                "help_text": "Specifies how HSPF will run.",
                 "pdf_page": 30,
                 "required": True
             },
-            "Resume / Run": {
-                "placeholder": "e.g., RESUME     0 RUN     1",
-                "help_text": (
-                    "'RESUME 0' means do not resume a previous run,\n"
-                    "'RUN 1' is the run ID. If continuing an older run,\n"
-                    "you might set 'RESUME 1 RUN 2', etc."
-                ),
+            "Resume": {
+                "placeholder": "e.g., 0",
+                "help_text": "'RESUME 0' means do not resume a previous run.",
+                "pdf_page": 30,
+                "required": True
+            },
+            "Run": {
+                "placeholder": "e.g., 1",
+                "help_text": "Sets a run number, e.g. 'RUN 1'.",
                 "pdf_page": 30,
                 "required": True
             },
             "Unit System": {
-                "placeholder": "1 = English, 2 = SI Metric",
-                "help_text": (
-                    "Defines the measurement units:\n"
-                    "1 = English (inch, foot)\n"
-                    "2 = Metric (mm, m, etc.)"
-                ),
+                "placeholder": "1=English, 2=Metric",
+                "help_text": "Defines unit system: 1=English, 2=Metric.",
                 "pdf_page": 31,
                 "required": True
             }
@@ -727,92 +730,85 @@ class UCIFileGeneratorApp(QMainWindow):
         self.open_section_window("GLOBAL", fields)
 
     def files_section(self):
-        # For a simpler section, you can keep it as just placeholders
         fields = {
-            "WDM1 File Name": "Enter the first WDM file name (e.g., CONMET.WDM)",
-            "WDM2 File Name": "Enter the second WDM file name (e.g., CONOUT.WDM)"
+            "WDM1 File Name": "Enter the first WDM file name (e.g. CONMET.WDM)",
+            "WDM2 File Name": "Enter the second WDM file name (e.g. CONOUT.WDM)"
         }
         self.open_section_window("FILES", fields)
 
     def opn_sequence_section(self):
-        fields = {
-            "Operation Sequence": "Define the operation sequence (e.g., INDELT 00:15)"
-        }
+        fields = {"Operation Sequence": "Define the operation sequence (e.g., INDELT 00:15)"}
         self.open_section_window("OPN SEQUENCE", fields)
 
     def perlnd_section(self):
-        fields = {
-            "Pervious Land Parameters": "Specify parameters for pervious land areas"
-        }
+        fields = {"Pervious Land Parameters": "Specify parameters for pervious land areas"}
         self.open_section_window("PERLND", fields)
 
     def implnd_section(self):
-        fields = {
-            "Impervious Land Parameters": "Specify parameters for impervious land areas"
-        }
+        fields = {"Impervious Land Parameters": "Specify parameters for impervious land areas"}
         self.open_section_window("IMPLND", fields)
 
     def rchres_section(self):
-        fields = {
-            "Routing Parameters": "Specify parameters for reaches and reservoirs"
-        }
+        fields = {"Routing Parameters": "Specify parameters for reaches and reservoirs"}
         self.open_section_window("RCHRES", fields)
 
     def ftables_section(self):
-        fields = {
-            "FTable Parameters": "Specify flow tables for routing"
-        }
+        fields = {"FTable Parameters": "Specify flow tables for routing"}
         self.open_section_window("FTABLES", fields)
 
     def ext_sources_section(self):
-        fields = {
-            "External Source Parameters": "Define external input sources"
-        }
+        fields = {"External Source Parameters": "Define external input sources"}
         self.open_section_window("EXT SOURCES", fields)
 
     def ext_targets_section(self):
-        fields = {
-            "External Target Parameters": "Specify targets for external inputs"
-        }
+        fields = {"External Target Parameters": "Specify targets for external inputs"}
         self.open_section_window("EXT TARGETS", fields)
 
     def network_section(self):
-        fields = {
-            "Flow Network Parameters": "Define flow relationships between elements"
-        }
+        fields = {"Flow Network Parameters": "Define flow relationships between elements"}
         self.open_section_window("NETWORK", fields)
 
 
-# If you want a function to generate the final GLOBAL text, do it outside or as a method
-def generate_global_section(global_data):
+# -------------------------------------------------------
+# Generate text for GLOBAL (you could add others similarly)
+# -------------------------------------------------------
+def generate_global_section_text(data_dict):
     """
-    Example function to format a GLOBAL section with alignment.
-    You'd call this after the user has fully filled out global_data.
+    data_dict might look like:
+    {
+      "Model Name": "SIXTEEN MILE CREEK WATERSHED...",
+      "Start Date (YYYY/MM/DD)": "1962/01/01",
+      "End Date (YYYY/MM/DD)": "2017/12/31",
+      "Run/Interp/Output Level": "RUN INTERP OUTPUT LEVEL    3",
+      "Resume": "0",
+      "Run": "1",
+      "Unit System": "2"
+    }
     """
     lines = []
-    lines.append("*** GLOBAL PARAMETERS ***")
     lines.append("GLOBAL")
-    model_name = global_data.get("Model Name", "").strip()
-    lines.append(f"  {model_name}")
+    lines.append(f"  {data_dict.get('Model Name', '').strip()}")
 
-    start_date = global_data.get("Start Date (YYYY/MM/DD)", "")
-    end_date = global_data.get("End Date (YYYY/MM/DD)", "")
-    lines.append(f"  START       {start_date:<16}END    {end_date}")
+    start_d = data_dict.get("Start Date (YYYY/MM/DD)", "")
+    end_d   = data_dict.get("End Date (YYYY/MM/DD)", "")
+    lines.append(f"  START       {start_d:<16}  END    {end_d}")
 
-    run_interp_output_level = global_data.get("Run/Interp/Output Level", "RUN INTERP OUTPUT LEVEL    3")
-    lines.append(f"  {run_interp_output_level}")
+    run_interp = data_dict.get("Run/Interp/Output Level", "RUN INTERP OUTPUT LEVEL    3")
+    lines.append(f"  RUN INTERP OUTPUT LEVEL    {run_interp}")
 
-    resume_run = global_data.get("Resume / Run", "RESUME     0 RUN     1")
-    resume_run_str = f"{resume_run:<32}"
-    unit_system = global_data.get("Unit System", 2)
-    lines.append(f"  {resume_run_str}UNIT SYSTEM     {unit_system}")
+    resume_val = data_dict.get("Resume", "0")
+    run_val    = data_dict.get("Run", "1")
+    combined   = f"RESUME     {resume_val} RUN     {run_val}"
+    combined   = f"{combined:<32}"  # left-justify
+    unit_sys   = data_dict.get("Unit System", "2")
+    lines.append(f"  {combined}         UNIT SYSTEM     {unit_sys}")
+
     lines.append("END GLOBAL")
-    return lines
+    return "\n".join(lines)
 
-
-# ----------------------------------------------------------------------
-# Launch
-# ----------------------------------------------------------------------
+# -------------------------------------------------------
+# Main Entry Point
+# -------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = UCIFileGeneratorApp()
