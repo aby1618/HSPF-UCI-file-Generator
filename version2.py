@@ -45,6 +45,9 @@ class SectionWindow(QDialog):
             label = QLabel(field_name)
             row_layout.addWidget(label)
 
+            tooltip_text = field_info.get("help_text", "") if isinstance(field_info, dict) else ""
+            label.setToolTip(tooltip_text)  # Add tooltip to label
+
             # Determine if it's a date field
             is_date_field = False
             placeholder_text = ""
@@ -139,35 +142,48 @@ class SectionWindow(QDialog):
         """
         Check if there's at least one filled field (-> enable Save),
         and if all required fields are filled (-> enable Preview).
+        Highlight invalid or empty required fields.
         """
         required_filled = True
         any_filled = False
 
         for field_name, field_info in self.fields.items():
             widget = self.input_fields[field_name]
+            is_valid = True
 
             # Extract the current value
             if isinstance(widget, QDateEdit):
                 val = widget.date().toString("yyyy/MM/dd").strip()
+                # Validate date fields if required
+                if field_info.get("required", False) and not widget.date().isValid():
+                    is_valid = False
             else:
                 val = widget.text().strip()
+                # Check if required text fields are filled
+                if field_info.get("required", False) and not val:
+                    is_valid = False
+
+            # Highlight invalid fields
+            if not is_valid:
+                widget.setStyleSheet("border: 1px solid orange;")
+                placeholder_error = field_info.get("placeholder", "") + " (Required)"
+                if isinstance(widget, QDateEdit):
+                    widget.lineEdit().setPlaceholderText(placeholder_error)
+                else:
+                    widget.setPlaceholderText(placeholder_error)
+                required_filled = False
+            else:
+                widget.setStyleSheet("")  # Reset style if valid
 
             if val:
                 any_filled = True
-
-            # If it's a required field, check emptiness
-            if isinstance(field_info, dict) and field_info.get("required", False):
-                if not val:
-                    required_filled = False
 
         self.save_button.setEnabled(any_filled)
         self.preview_button.setEnabled(any_filled and required_filled)
 
     def on_preview_clicked(self):
         """
-        Build a multiline text from the user's current field values,
-        then display it in a dialog. If it's GLOBAL, we use
-        generate_global_section_text. Otherwise, we do a placeholder.
+        Opens a preview dialog with the section content.
         """
         # Gather current user inputs
         data_dict = {}
@@ -177,29 +193,23 @@ class SectionWindow(QDialog):
             else:
                 data_dict[field_name] = widget.text().strip()
 
-        # If this is the GLOBAL section, produce real text
+        # Generate the preview text for the section
         if self.section_name == "GLOBAL":
             preview_text = generate_global_section_text(data_dict)
+        elif self.section_name == "FILES":
+            preview_text = generate_files_section_text(data_dict)
         else:
-            # Placeholder for other sections
-            # You can implement a real function for each if you like
             preview_text = f"[Preview not implemented for '{self.section_name}']"
 
-        # Show the preview in a simple QDialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Preview: {self.section_name}")
-        layout = QVBoxLayout(dialog)
-
-        text_area = QPlainTextEdit()
-        text_area.setReadOnly(True)
-        text_area.setPlainText(preview_text)
-        layout.addWidget(text_area)
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.close)
-        layout.addWidget(close_btn)
-
-        dialog.exec()
+        # Open the reusable PreviewDialog
+        preview_dialog = PreviewDialog(
+            title=f"Preview: {self.section_name}",
+            content=preview_text,
+            width=900,  # Adjusted dimensions
+            height=700,
+            parent=self
+        )
+        preview_dialog.exec()
 
     def on_reset_clicked(self):
         """
@@ -289,6 +299,67 @@ class SectionWindow(QDialog):
 
         dialog.exec()
 
+class PreviewDialog(QDialog):
+    def __init__(self, title, content, width=800, height=600, parent=None):
+        """
+        Reusable dialog to display preview text with Copy and Save buttons.
+        """
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(width, height)
+
+        # Main layout
+        layout = QVBoxLayout(self)
+
+        # Text area
+        self.text_area = QPlainTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setPlainText(content)
+        layout.addWidget(self.text_area)
+
+        # Buttons layout
+        button_layout = QHBoxLayout()
+
+        # Copy button
+        copy_button = QPushButton("Copy")
+        copy_button.clicked.connect(self.copy_to_clipboard)
+        button_layout.addWidget(copy_button)
+
+        # Save button
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save_to_file)
+        button_layout.addWidget(save_button)
+
+        # Close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
+        button_layout.addWidget(close_button)
+
+        layout.addLayout(button_layout)
+
+    def copy_to_clipboard(self):
+        """
+        Copies the content of the text area to the clipboard.
+        """
+        text = self.text_area.toPlainText()
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, "Copied", "Text has been copied to clipboard.")
+
+    def save_to_file(self):
+        """
+        Opens a file dialog to save the content as a .txt file.
+        """
+        file_dialog = QFileDialog(self)
+        save_path, _ = file_dialog.getSaveFileName(
+            self, "Save File", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if save_path:
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(self.text_area.toPlainText())
+                QMessageBox.information(self, "Success", f"File saved to {save_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save file:\n{e}")
 
 # -------------------------------------------------------
 # Functions for Parsing the Diagram and Summaries
@@ -730,9 +801,52 @@ class UCIFileGeneratorApp(QMainWindow):
         self.open_section_window("GLOBAL", fields)
 
     def files_section(self):
+        """
+        Opens a section window for FILES, allowing the user to specify input and output file names.
+        """
         fields = {
-            "WDM1 File Name": "Enter the first WDM file name (e.g. CONMET.WDM)",
-            "WDM2 File Name": "Enter the second WDM file name (e.g. CONOUT.WDM)"
+            "WDM1 (Input File Name)": {
+                "placeholder": "e.g., CONMET.WDM",
+                "help_text": "The primary input file for data.",
+                "pdf_page": 52,
+                "required": True,
+            },
+            "WDM2 (Output File Name)": {
+                "placeholder": "e.g., CONOUT.WDM",
+                "help_text": "The primary output file for data.",
+                "pdf_page": 52,
+                "required": True,
+            },
+            "INFO (Output File Name)": {
+                "placeholder": "e.g., 01_HSPINF.DA",
+                "help_text": "The file for general information output.",
+                "pdf_page": 53,
+                "required": True,
+            },
+            "ERROR (Output File Name)": {
+                "placeholder": "e.g., 01_HSPERR.DA",
+                "help_text": "The file for error message logs.",
+                "pdf_page": 53,
+                "required": True,
+            },
+            "WARN (Output File Name)": {
+                "placeholder": "e.g., 01_HSPWRN.DA",
+                "help_text": "The file for warning message logs.",
+                "pdf_page": 53,
+                "required": True,
+            },
+            "MESSU (Output File Name)": {
+                "placeholder": "e.g., 01_HSPMES.DA",
+                "help_text": "The file for user message logs.",
+                "pdf_page": 53,
+                "required": True,
+            },
+            "Optional Output File": {
+                "placeholder": "e.g., 01_EXTL1.OUT",
+                "help_text": "Any additional output file (optional).",
+                "pdf_page": 53,
+                "required": False,
+            },
         }
         self.open_section_window("FILES", fields)
 
@@ -804,6 +918,36 @@ def generate_global_section_text(data_dict):
     lines.append(f"  {combined}         UNIT SYSTEM     {unit_sys}")
 
     lines.append("END GLOBAL")
+    return "\n".join(lines)
+
+def generate_files_section_text(data_dict):
+    """
+    Generate the text for the FILES section from the user-provided data.
+    """
+    lines = []
+    lines.append("FILES")
+    lines.append("<ftyp>  <un#>   <-------file name ------------------------------------->****")
+
+    # Add required file entries
+    file_entries = [
+        ("WDM1", 23, data_dict.get("WDM1 (Input File Name)", "").strip()),
+        ("WDM2", 21, data_dict.get("WDM2 (Output File Name)", "").strip()),
+        ("INFO", 24, data_dict.get("INFO (Output File Name)", "").strip()),
+        ("ERROR", 25, data_dict.get("ERROR (Output File Name)", "").strip()),
+        ("WARN", 26, data_dict.get("WARN (Output File Name)", "").strip()),
+        ("MESSU", 27, data_dict.get("MESSU (Output File Name)", "").strip()),
+    ]
+
+    for ftyp, un, fname in file_entries:
+        if fname:
+            lines.append(f"{ftyp:<10}{un:<6}{fname}")
+
+    # Add optional file entry if provided
+    optional_file = data_dict.get("Optional Output File", "").strip()
+    if optional_file:
+        lines.append(f"{'':<10}{50:<6}{optional_file}")
+
+    lines.append("END FILES")
     return "\n".join(lines)
 
 # -------------------------------------------------------
