@@ -9,6 +9,7 @@ import webbrowser
 import sys
 from lxml import etree
 import json
+import pandas as pd
 
 # -------------------------------------------------------
 # SectionWindow: Handles one UCI section (GLOBAL, FILES, etc.)
@@ -415,6 +416,21 @@ def parse_edges(root):
             edges.append((src_id, tgt_id, style))
     return edges
 
+def normalize_target_types(shapes_by_id):
+    """
+    Normalize target types to ensure Nodes and SWM Facilities
+    are classified as RCHRES if applicable.
+    """
+    for shape_id, data in shapes_by_id.items():
+        label = data.get("label", "")
+        hydro_type = data.get("hydro_type", "")
+
+        # Normalize Node and SWM Facility to RCHRES if the label is numeric
+        if hydro_type in ["Node", "SWM Facility"] and label.isdigit():
+            print(f"Normalizing {label}: {hydro_type} -> RCHRES")  # Debug
+            shapes_by_id[shape_id]["hydro_type"] = "RCHRES"
+
+
 def build_graph(shapes_by_id, edges):
     for (src, tgt, style) in edges:
         if src in shapes_by_id and tgt in shapes_by_id:
@@ -560,7 +576,6 @@ class ModelSummaryDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error saving file:\n{e}")
 
-
 # -------------------------------------------------------
 # UCIFileGeneratorApp: Main Window
 # -------------------------------------------------------
@@ -702,6 +717,10 @@ class UCIFileGeneratorApp(QMainWindow):
                 self.shapes_by_id = parse_shapes(root)
                 edges = parse_edges(root)
                 build_graph(self.shapes_by_id, edges)
+
+                # Normalize target types
+                normalize_target_types(self.shapes_by_id)
+
                 QMessageBox.information(self, "Import Complete", "File parsed successfully.")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to parse XML:\n{e}")
@@ -879,8 +898,56 @@ class UCIFileGeneratorApp(QMainWindow):
         self.open_section_window("EXT TARGETS", fields)
 
     def network_section(self):
-        fields = {"Flow Network Parameters": "Define flow relationships between elements"}
-        self.open_section_window("NETWORK", fields)
+        if not self.shapes_by_id:
+            QMessageBox.warning(self, "No Data", "No model data has been imported yet.")
+            return
+
+        # Load drainage areas from Excel
+        drainage_area_mapping = self.load_drainage_areas()
+        if not drainage_area_mapping:
+            return
+
+        # Generate the NETWORK block
+        network_block = generate_corrected_network_block(self.shapes_by_id, drainage_area_mapping)
+
+        # Show the NETWORK block in the preview dialog
+        preview_dialog = PreviewDialog(
+            title="Preview: NETWORK",
+            content="\n".join(network_block),
+            width=900,
+            height=700,
+            parent=self
+        )
+        preview_dialog.exec()
+
+    def load_drainage_areas(self):
+        """
+        Load drainage areas from the Excel file into a mapping.
+        """
+        file_dialog = QFileDialog(self)
+        excel_file, _ = file_dialog.getOpenFileName(
+            self, "Select Excel File", "", "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not excel_file:
+            QMessageBox.warning(self, "No File", "No Excel file selected.")
+            return {}
+
+        try:
+            df = pd.read_excel(excel_file)
+            drainage_area_mapping = {}
+            for _, row in df.iterrows():
+                subcatchment = int(row["SUBCATCHMENT"])  # Convert to integer to avoid extra `.0`
+                perlnd_area = row["PERLND"]
+                implnd_area = row["IMPLND"]
+
+                drainage_area_mapping[f"PERLND {subcatchment}.0"] = perlnd_area
+                drainage_area_mapping[f"IMPLND {subcatchment}.0"] = implnd_area
+
+            print(f"Drainage Area Mapping Loaded: {drainage_area_mapping}")  # Debug
+            return drainage_area_mapping
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load Excel file:\n{e}")
+            return {}
 
 
 # -------------------------------------------------------
@@ -949,6 +1016,64 @@ def generate_files_section_text(data_dict):
 
     lines.append("END FILES")
     return "\n".join(lines)
+
+def generate_corrected_network_block(shapes_by_id, drainage_area_mapping):
+    """
+    Generate the NETWORK block with corrected drainage areas and relationships.
+    """
+    network_lines = []
+
+    for shape_id, shape_data in shapes_by_id.items():
+        label = shape_data["label"]
+        hydro_type = shape_data["hydro_type"]
+        outgoing = shape_data["outgoing"]
+
+        # Skip if the label or hydrologic type is invalid
+        if not label or hydro_type not in ["Subcatchment", "RCHRES"]:
+            continue
+
+        print(f"Processing: {label} ({hydro_type})")  # Debug
+
+        # Process outgoing connections
+        for connection in outgoing:
+            target_id = connection["target"]
+            target_data = shapes_by_id.get(target_id, {})
+            target_label = target_data.get("label", "")
+            target_type = target_data.get("hydro_type", "")
+
+            print(f"  Connection to: {target_label} ({target_type})")  # Debug
+
+            # Handle Subcatchments (PERLND, IMPLND)
+            if hydro_type == "Subcatchment":
+                perlnd_key = f"PERLND {label}.0"
+                implnd_key = f"IMPLND {label}.0"
+
+                # Add PERLND connection if it exists
+                if perlnd_key in drainage_area_mapping:
+                    drainage_area = round(drainage_area_mapping[perlnd_key] / 100000, 7)
+                    print(f"  Adding PERLND: {perlnd_key} with drainage {drainage_area}")  # Debug
+                    network_lines.append(
+                        f"PERLND {label:<3} PWATER PERO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
+                    )
+
+                # Add IMPLND connection if it exists
+                if implnd_key in drainage_area_mapping:
+                    drainage_area = round(drainage_area_mapping[implnd_key] / 100000, 7)
+                    print(f"  Adding IMPLND: {implnd_key} with drainage {drainage_area}")  # Debug
+                    network_lines.append(
+                        f"IMPLND {label:<3} IWATER SURO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
+                    )
+
+            # Handle RCHRES relationships
+            elif hydro_type == "RCHRES" and target_label:
+                print(f"  Adding RCHRES: {label} -> {target_label}")  # Debug
+                network_lines.append(
+                    f"RCHRES {label:<3} HYDR   ROVOL                    RCHRES {target_label:<3}     INFLOW"
+                )
+
+    return network_lines
+
+
 
 # -------------------------------------------------------
 # Main Entry Point
