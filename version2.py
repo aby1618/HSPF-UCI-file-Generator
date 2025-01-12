@@ -582,6 +582,9 @@ class ModelSummaryDialog(QDialog):
 class UCIFileGeneratorApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.loaded_excel_file = None  # Store the loaded Excel file path
+        self.drainage_area_mapping = None  # Store the drainage area mapping
+
         self.pdf_base_url = (
             "https://hydrologicmodels.tamu.edu/wp-content/uploads/sites/103/2018/09/HSPF_User-Manual.pdf"
         )
@@ -647,49 +650,57 @@ class UCIFileGeneratorApp(QMainWindow):
         input_layout.setContentsMargins(10, 10, 10, 10)
 
         # Import Draw.io File button
+        drawio_layout = QHBoxLayout()
         self.import_button = QPushButton("Import Draw.io File")
         self.import_button.clicked.connect(self.import_drawio_file)
-        input_layout.addWidget(self.import_button)
+        drawio_layout.addWidget(self.import_button)
+
+        # Tick mark for Import Draw.io File
+        self.drawio_tick_button = QPushButton("✔")
+        self.drawio_tick_button.setFixedSize(35, 35)
+        self.drawio_tick_button.setStyleSheet(
+            "background-color: grey; color: white; font-weight: bold; border-radius: 15px;"
+        )
+        self.drawio_tick_button.setToolTip("No file selected")  # Default tooltip
+        self.drawio_tick_button.clicked.connect(self.toggle_drawio_tooltip)  # Fixed method
+        drawio_layout.addWidget(self.drawio_tick_button)
+        input_layout.addLayout(drawio_layout)
 
         # Load JSON button
+        json_layout = QHBoxLayout()
         self.load_json_button = QPushButton("Load JSON")
         self.load_json_button.clicked.connect(self.load_json_data)
-        input_layout.addWidget(self.load_json_button)
+        json_layout.addWidget(self.load_json_button)
 
-        # Load Excel File button with tick mark and label in a compact layout
+        # Tick mark for Load JSON
+        self.json_tick_button = QPushButton("✔")
+        self.json_tick_button.setFixedSize(35, 35)
+        self.json_tick_button.setStyleSheet(
+            "background-color: grey; color: white; font-weight: bold; border-radius: 15px;"
+        )
+        self.json_tick_button.setToolTip("No file selected")  # Default tooltip
+        self.json_tick_button.clicked.connect(self.toggle_json_tooltip)  # Fixed method
+        json_layout.addWidget(self.json_tick_button)
+        input_layout.addLayout(json_layout)
+
+        # Load Excel File button
         excel_layout = QHBoxLayout()
         self.load_excel_button = QPushButton("Load Excel File")
         self.load_excel_button.clicked.connect(self.load_drainage_areas)
         self.load_excel_button.setToolTip("No file selected")  # Default tooltip
         excel_layout.addWidget(self.load_excel_button)
 
-        # Tick mark and label container
-        self.tick_label_container = QHBoxLayout()
-
-        # Tick mark button
+        # Tick mark for Load Excel File
         self.excel_tick_button = QPushButton("✔")
         self.excel_tick_button.setFixedSize(35, 35)
         self.excel_tick_button.setStyleSheet(
-            "background-color: darkgreen; color: white; font-weight: bold; border-radius: 15px;"
+            "background-color: grey; color: white; font-weight: bold; border-radius: 15px;"
         )
-        self.excel_tick_button.setVisible(False)  # Initially hidden
+        self.excel_tick_button.setToolTip("No file selected")  # Default tooltip
         self.excel_tick_button.clicked.connect(self.toggle_excel_tooltip)
-        self.tick_label_container.addWidget(self.excel_tick_button)
-
-        # Label for full path toggle
-        self.toggle_label = QLabel("Click for Full Path")
-        self.toggle_label.setStyleSheet(
-            "color: lightgray; font-size: 12px; padding-left: 5px;"
-        )
-        self.toggle_label.setVisible(False)  # Initially hidden
-        self.toggle_label.mousePressEvent = self.toggle_full_path
-        self.tick_label_container.addWidget(self.toggle_label)
-
-        # Add tick mark and label container to the Excel layout
-        excel_layout.addLayout(self.tick_label_container)
-
-        # Add Excel layout to the main input layout
+        excel_layout.addWidget(self.excel_tick_button)
         input_layout.addLayout(excel_layout)
+
         input_group.setLayout(input_layout)
         return input_group
 
@@ -808,20 +819,31 @@ class UCIFileGeneratorApp(QMainWindow):
     # JSON Load/Save
     # -----------------------------------------
     def load_json_data(self):
+        """
+        Load a JSON file and update the tick mark button.
+        """
         file_dialog = QFileDialog(self)
         json_file, _ = file_dialog.getOpenFileName(
             self, "Select JSON File", "", "JSON Files (*.json);;All Files (*)"
         )
         if not json_file:
+            QMessageBox.warning(self, "No File", "No JSON file selected.")
             return
 
         try:
             with open(json_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.section_data = data if isinstance(data, dict) else {}
-            QMessageBox.information(self, "JSON Loaded", "Section data loaded from JSON.")
+
+            # Update tickmark button style and tooltip
+            self.json_tick_button.setStyleSheet(
+                "background-color: green; color: white; font-weight: bold; border-radius: 15px;"
+            )
+            self.update_file_tooltip(self.json_tick_button, json_file)
+
+            QMessageBox.information(self, "Success", "JSON file has been loaded successfully.")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load JSON:\n{e}")
+            QMessageBox.critical(self, "Error", f"Failed to load JSON file:\n{e}")
 
     def save_json_data(self):
         file_dialog = QFileDialog(self)
@@ -842,24 +864,34 @@ class UCIFileGeneratorApp(QMainWindow):
     # Import & Show Model
     # -----------------------------------------
     def import_drawio_file(self):
+        """
+        Import a Draw.io file and update the tick mark button.
+        """
         file_dialog = QFileDialog(self)
-        xml_file, _ = file_dialog.getOpenFileName(
-            self, "Select Draw.io XML", "", "XML Files (*.xml)"
+        drawio_file, _ = file_dialog.getOpenFileName(
+            self, "Select Draw.io XML", "", "XML Files (*.xml);;All Files (*)"
         )
-        if xml_file:
-            try:
-                tree = etree.parse(xml_file)
-                root = tree.getroot()
-                self.shapes_by_id = parse_shapes(root)
-                edges = parse_edges(root)
-                build_graph(self.shapes_by_id, edges)
+        if not drawio_file:
+            QMessageBox.warning(self, "No File", "No Draw.io file selected.")
+            return
 
-                # Normalize target types
-                normalize_target_types(self.shapes_by_id)
+        try:
+            # Process the file (existing logic)
+            tree = etree.parse(drawio_file)
+            root = tree.getroot()
+            self.shapes_by_id = parse_shapes(root)
+            edges = parse_edges(root)
+            build_graph(self.shapes_by_id, edges)
 
-                QMessageBox.information(self, "Import Complete", "File parsed successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to parse XML:\n{e}")
+            # Update tickmark button style and tooltip
+            self.drawio_tick_button.setStyleSheet(
+                "background-color: green; color: white; font-weight: bold; border-radius: 15px;"
+            )
+            self.update_file_tooltip(self.drawio_tick_button, drawio_file)
+
+            QMessageBox.information(self, "Success", "Draw.io file has been loaded successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load Draw.io file:\n{e}")
 
     def show_imported_model(self):
         if not self.shapes_by_id:
@@ -1034,27 +1066,43 @@ class UCIFileGeneratorApp(QMainWindow):
         self.open_section_window("EXT TARGETS", fields)
 
     def network_section(self):
+        """
+        Handle the NETWORK section logic, ensuring the network block is generated correctly.
+        """
         if not self.shapes_by_id:
             QMessageBox.warning(self, "No Data", "No model data has been imported yet.")
             return
 
-        # Load drainage areas from Excel
-        drainage_area_mapping = self.load_drainage_areas()
-        if not drainage_area_mapping:
-            return
+        if not self.drainage_area_mapping:
+            QMessageBox.warning(self, "Excel File Required", "Please load an Excel file to proceed.")
+            self.load_drainage_areas()  # Allow the user to load the file
+            if not self.drainage_area_mapping:
+                return
 
-        # Generate the NETWORK block
-        network_block = generate_corrected_network_block(self.shapes_by_id, drainage_area_mapping)
+        try:
+            # Debug: Inputs before generating the network block
+            print(f"Shapes by ID: {self.shapes_by_id}")
+            print(f"Drainage Area Mapping: {self.drainage_area_mapping}")
 
-        # Show the NETWORK block in the preview dialog
-        preview_dialog = PreviewDialog(
-            title="Preview: NETWORK",
-            content="\n".join(network_block),
-            width=900,
-            height=700,
-            parent=self
-        )
-        preview_dialog.exec()
+            # Generate the NETWORK block
+            network_block = generate_corrected_network_block(self.shapes_by_id, self.drainage_area_mapping)
+
+            if not network_block:
+                QMessageBox.warning(self, "Error", "Failed to generate network block.")
+                return
+
+            # Show the NETWORK block in the preview dialog
+            preview_dialog = PreviewDialog(
+                title="Preview: NETWORK",
+                content="\n".join(network_block),
+                width=900,
+                height=700,
+                parent=self
+            )
+            preview_dialog.exec()
+        except Exception as e:
+            print(f"Error in network_section: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to generate NETWORK section:\n{e}")
 
     def load_drainage_areas(self):
         """
@@ -1079,14 +1127,18 @@ class UCIFileGeneratorApp(QMainWindow):
                 drainage_area_mapping[f"PERLND {subcatchment}.0"] = perlnd_area
                 drainage_area_mapping[f"IMPLND {subcatchment}.0"] = implnd_area
 
+            # Store the state
+            self.loaded_excel_file = excel_file
+            self.drainage_area_mapping = drainage_area_mapping
+
+            # Update tickmark button style and tooltip
+            self.excel_tick_button.setStyleSheet(
+                "background-color: green; color: white; font-weight: bold; border-radius: 15px;"
+            )
+            self.update_file_tooltip(self.excel_tick_button, excel_file)
+
             # Confirmation message
             QMessageBox.information(self, "Success", "Excel file has been loaded successfully.")
-
-            # Update tick mark button and toggle label visibility and tooltip
-            self.excel_tick_button.setVisible(True)
-            self.toggle_label.setVisible(True)
-            self.update_file_tooltip(self.load_excel_button, excel_file)
-
             return drainage_area_mapping
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load Excel file:\n{e}")
@@ -1094,15 +1146,22 @@ class UCIFileGeneratorApp(QMainWindow):
 
     def update_file_tooltip(self, button, file_path):
         """
-        Update the tooltip for the tick mark button and label to show the file name or full path.
+        Update the tooltip for the tick mark button to show the file name or full path.
         """
-        self.selected_file_name = file_path.split("/")[-1]  # Extract the file name
-        self.selected_full_path = file_path  # Full path of the file
-        self.is_showing_full_path = False  # Default state: show file name
+        file_name = file_path.split("/")[-1]  # Extract the file name
+        button.setToolTip(f"File: {file_name}")  # Default to file name
+        button.full_path = file_path  # Store the full path in the button
 
-        # Set default tooltip to file name
-        button.setToolTip(f"File: {self.selected_file_name}")
-        self.toggle_label.setToolTip(f"Click to view full path: {self.selected_full_path}")
+        # Attach toggle functionality
+        def toggle_tooltip():
+            current_tooltip = button.toolTip()
+            if "Full Path" in current_tooltip:
+                button.setToolTip(f"File: {file_name}")  # Show file name
+            else:
+                button.setToolTip(f"Full Path: {file_path}")  # Show full path
+
+        button.clicked.disconnect()  # Ensure no duplicate connections
+        button.clicked.connect(toggle_tooltip)
 
     def toggle_full_path(self, event):
         """
@@ -1126,14 +1185,43 @@ class UCIFileGeneratorApp(QMainWindow):
         """
         Toggles the tooltip between the file name and full file path for the tick mark button.
         """
-        current_tooltip = self.excel_tick_button.toolTip()
-        if "Full Path" in current_tooltip:
-            # Switch to showing only the file name
-            file_name = current_tooltip.split("/")[-1]  # Extract file name
-            self.excel_tick_button.setToolTip(f"File: {file_name}")
+        if self.is_showing_full_path:
+            # Switch to file name
+            self.excel_tick_button.setToolTip(f"File: {self.selected_file_name}")
+            self.is_showing_full_path = False
         else:
-            # Switch to showing the full file path
-            self.excel_tick_button.setToolTip(f"Full Path: {current_tooltip.split(': ')[1]}")
+            # Switch to full path
+            self.excel_tick_button.setToolTip(f"Full Path: {self.selected_full_path}")
+            self.is_showing_full_path = True
+
+    def toggle_drawio_tooltip(self):
+        """
+        Toggles the tooltip between the file name and full file path for the Draw.io tick mark button.
+        """
+        if hasattr(self.drawio_tick_button, "full_path"):
+            current_tooltip = self.drawio_tick_button.toolTip()
+            if "Full Path" in current_tooltip:
+                # Switch to file name
+                file_name = self.drawio_tick_button.full_path.split("/")[-1]
+                self.drawio_tick_button.setToolTip(f"File: {file_name}")
+            else:
+                # Switch to full path
+                self.drawio_tick_button.setToolTip(f"Full Path: {self.drawio_tick_button.full_path}")
+
+    def toggle_json_tooltip(self):
+        """
+        Toggles the tooltip between the file name and full file path for the JSON tick mark button.
+        """
+        if hasattr(self.json_tick_button, "full_path"):
+            current_tooltip = self.json_tick_button.toolTip()
+            if "Full Path" in current_tooltip:
+                # Switch to file name
+                file_name = self.json_tick_button.full_path.split("/")[-1]
+                self.json_tick_button.setToolTip(f"File: {file_name}")
+            else:
+                # Switch to full path
+                self.json_tick_button.setToolTip(f"Full Path: {self.json_tick_button.full_path}")
+
 
 # -------------------------------------------------------
 # Generate text for GLOBAL (you could add others similarly)
@@ -1204,60 +1292,110 @@ def generate_files_section_text(data_dict):
 
 def generate_corrected_network_block(shapes_by_id, drainage_area_mapping):
     """
-    Generate the NETWORK block with corrected drainage areas and relationships.
+    Generate the NETWORK block with corrected drainage areas and relationships,
+    grouped and ordered as required.
     """
     network_lines = []
+    rchres_groups = {}
 
-    for shape_id, shape_data in shapes_by_id.items():
+    # Step 1: Process Subcatchments (PERLND, IMPLND) and group by their target RCHRES
+    for shape_id, shape_data in sorted(shapes_by_id.items(), key=lambda x: x[1]["label"]):
         label = shape_data["label"]
         hydro_type = shape_data["hydro_type"]
         outgoing = shape_data["outgoing"]
 
-        # Skip if the label or hydrologic type is invalid
-        if not label or hydro_type not in ["Subcatchment", "RCHRES"]:
-            continue
+        if hydro_type == "Subcatchment":
+            perlnd_key = f"PERLND {label}.0"
+            implnd_key = f"IMPLND {label}.0"
 
-        print(f"Processing: {label} ({hydro_type})")  # Debug
+            # Validate outgoing connections
+            if not outgoing or outgoing[0]["target"] not in shapes_by_id:
+                print(f"Warning: Invalid or missing target for Subcatchment {label}")
+                continue
 
-        # Process outgoing connections
-        for connection in outgoing:
-            target_id = connection["target"]
-            target_data = shapes_by_id.get(target_id, {})
-            target_label = target_data.get("label", "")
-            target_type = target_data.get("hydro_type", "")
+            target_id = outgoing[0]["target"]
+            target_label = shapes_by_id[target_id]["label"]
 
-            print(f"  Connection to: {target_label} ({target_type})")  # Debug
+            if target_label not in rchres_groups:
+                rchres_groups[target_label] = []
 
-            # Handle Subcatchments (PERLND, IMPLND)
-            if hydro_type == "Subcatchment":
-                perlnd_key = f"PERLND {label}.0"
-                implnd_key = f"IMPLND {label}.0"
+            # Add PERLND connection
+            if perlnd_key in drainage_area_mapping:
+                drainage_area = round(drainage_area_mapping[perlnd_key] / 100000, 7)
+                rchres_groups[target_label].append(
+                    f"PERLND {label:<3} PWATER PERO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
+                )
+                print(f"Added PERLND Connection: {label} -> {target_label}")
 
-                # Add PERLND connection if it exists
-                if perlnd_key in drainage_area_mapping:
-                    drainage_area = round(drainage_area_mapping[perlnd_key] / 100000, 7)
-                    print(f"  Adding PERLND: {perlnd_key} with drainage {drainage_area}")  # Debug
-                    network_lines.append(
-                        f"PERLND {label:<3} PWATER PERO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
-                    )
+            # Add IMPLND connection
+            if implnd_key in drainage_area_mapping:
+                drainage_area = round(drainage_area_mapping[implnd_key] / 100000, 7)
+                rchres_groups[target_label].append(
+                    f"IMPLND {label:<3} IWATER SURO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
+                )
+                print(f"Added IMPLND Connection: {label} -> {target_label}")
 
-                # Add IMPLND connection if it exists
-                if implnd_key in drainage_area_mapping:
-                    drainage_area = round(drainage_area_mapping[implnd_key] / 100000, 7)
-                    print(f"  Adding IMPLND: {implnd_key} with drainage {drainage_area}")  # Debug
-                    network_lines.append(
-                        f"IMPLND {label:<3} IWATER SURO      {drainage_area:<9.7f}      RCHRES {target_label:<3}     INFLOW"
-                    )
+    # Step 2: Process RCHRES relationships
+    for shape_id, shape_data in sorted(shapes_by_id.items(), key=lambda x: x[1]["label"]):
+        if shape_data["hydro_type"] in ["RCHRES", "Node", "SWM Facility"]:
+            label = shape_data["label"]
 
-            # Handle RCHRES relationships
-            elif hydro_type == "RCHRES" and target_label:
-                print(f"  Adding RCHRES: {label} -> {target_label}")  # Debug
-                network_lines.append(
+            for connection in shape_data["outgoing"]:
+                target_id = connection["target"]
+                if target_id not in shapes_by_id:
+                    print(f"Warning: Invalid or missing target ID {target_id} for RCHRES {label}")
+                    continue
+
+                target_label = shapes_by_id[target_id]["label"]
+                if label not in rchres_groups:
+                    rchres_groups[label] = []
+                rchres_groups[label].append(
                     f"RCHRES {label:<3} HYDR   ROVOL                    RCHRES {target_label:<3}     INFLOW"
                 )
+                print(f"Added RCHRES Connection: {label} -> {target_label}")
 
+    # Step 3: Order and Format the Output
+    processed_rchres = set()
+
+    def process_rchres(label):
+        if label in processed_rchres:
+            print(f"Skipping already processed RCHRES: {label}")
+            return
+
+        # Debug: Starting processing
+        print(f"Processing RCHRES Group: {label}")
+
+        # Add the group for this RCHRES
+        if label in rchres_groups and rchres_groups[label]:
+            network_lines.extend(rchres_groups[label])
+            network_lines.append("")  # Add a blank line between groups
+
+        processed_rchres.add(label)
+
+        # Process downstream connections
+        for line in rchres_groups.get(label, []):
+            if "RCHRES" in line:
+                target_label = line.split()[-2]
+                if target_label in rchres_groups:
+                    process_rchres(target_label)
+                else:
+                    print(f"Warning: Target label {target_label} not found in RCHRES groups.")
+
+    # Start with all RCHRES groups
+    for label in rchres_groups:
+        process_rchres(label)
+
+    # Final clean-up: Remove trailing blank line
+    if network_lines and network_lines[-1] == "":
+        network_lines.pop()
+
+    # Debug final output
+    if not network_lines:
+        print("Error: No valid network lines generated.")
+        return None
+
+    print(f"Generated Network Block: \n{network_lines}")
     return network_lines
-
 
 
 # -------------------------------------------------------
