@@ -1038,8 +1038,33 @@ class UCIFileGeneratorApp(QMainWindow):
         self.open_section_window("FILES", fields)
 
     def opn_sequence_section(self):
-        fields = {"Operation Sequence": "Define the operation sequence (e.g., INDELT 00:15)"}
-        self.open_section_window("OPN SEQUENCE", fields)
+        """
+        Generate and preview the Operation Sequence Block.
+        """
+        if not hasattr(self, "network_block") or not self.network_block:
+            QMessageBox.warning(self, "No Network Block", "Generate the NETWORK block first.")
+            return
+
+        try:
+            # Generate the Operation Sequence Block
+            operation_sequence = generate_operation_sequence_block(self.network_block)
+
+            if not operation_sequence:
+                QMessageBox.warning(self, "Error", "Failed to generate Operation Sequence block.")
+                return
+
+            # Show the Operation Sequence Block in the preview dialog
+            preview_dialog = PreviewDialog(
+                title="Preview: Operation Sequence",
+                content="\n".join(operation_sequence),
+                width=600,
+                height=400,
+                parent=self
+            )
+            preview_dialog.exec()
+        except Exception as e:
+            print(f"Error in opn_sequence_section: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to generate Operation Sequence block:\n{e}")
 
     def perlnd_section(self):
         fields = {"Pervious Land Parameters": "Specify parameters for pervious land areas"}
@@ -1080,16 +1105,15 @@ class UCIFileGeneratorApp(QMainWindow):
                 return
 
         try:
-            # Debug: Inputs before generating the network block
-            print(f"Shapes by ID: {self.shapes_by_id}")
-            print(f"Drainage Area Mapping: {self.drainage_area_mapping}")
-
             # Generate the NETWORK block
             network_block = generate_corrected_network_block(self.shapes_by_id, self.drainage_area_mapping)
 
             if not network_block:
                 QMessageBox.warning(self, "Error", "Failed to generate network block.")
                 return
+
+            # Store the generated NETWORK block for later use
+            self.network_block = network_block
 
             # Show the NETWORK block in the preview dialog
             preview_dialog = PreviewDialog(
@@ -1397,6 +1421,61 @@ def generate_corrected_network_block(shapes_by_id, drainage_area_mapping):
     print(f"Generated Network Block: \n{network_lines}")
     return network_lines
 
+def generate_operation_sequence_block(network_block):
+    """
+    Generate the Operation Sequence Block from the given NETWORK block.
+    Ensures all RCHRES targets are included, even if only referenced downstream,
+    while preserving grouping and sequence order.
+    """
+    operation_sequence = []
+    processed_operations = set()  # To track operations already added
+    referenced_rchres_targets = set()  # To track all RCHRES targets explicitly referenced
+
+    current_group = []  # Temporary storage for operations within the current group
+
+    def flush_group():
+        """Flush the current group to the operation sequence and clear it."""
+        if current_group:
+            operation_sequence.extend(current_group)
+            operation_sequence.append("")  # Add a blank line to separate groups
+            current_group.clear()
+
+    for line in network_block:
+        if not line.strip():  # Blank line indicates group separation
+            flush_group()
+            continue
+
+        parts = line.split()
+        if len(parts) < 2:  # Skip invalid lines
+            continue
+
+        # Extract the operation and its ID
+        operation = f"{parts[0]} {parts[1]}"
+        if operation not in processed_operations:
+            processed_operations.add(operation)
+            current_group.append(operation)
+
+        # Track RCHRES targets explicitly referenced in the line
+        if parts[0] == "RCHRES" and len(parts) >= 8:
+            target_rchres = f"RCHRES {parts[-2]}"
+            referenced_rchres_targets.add(target_rchres)
+
+    # Flush the last group
+    flush_group()
+
+    # Add any unprocessed RCHRES targets to the sequence
+    unprocessed_targets = referenced_rchres_targets - processed_operations
+    if unprocessed_targets:
+        operation_sequence.append("")  # Separate dangling targets into a new group
+        for target in sorted(unprocessed_targets):
+            operation_sequence.append(target)
+            print(f"Added missing RCHRES target to operation sequence: {target}")
+
+    # Remove trailing blank lines
+    while operation_sequence and operation_sequence[-1] == "":
+        operation_sequence.pop()
+
+    return operation_sequence
 
 # -------------------------------------------------------
 # Main Entry Point
