@@ -1,9 +1,9 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QMessageBox,
-    QDialog, QFormLayout, QPlainTextEdit, QDateEdit
+    QDialog, QFormLayout, QPlainTextEdit, QDateEdit,QGroupBox
 )
-from PySide6.QtGui import Qt
+from PySide6.QtGui import Qt, QIcon
 from PySide6.QtCore import QDate
 import webbrowser
 import sys
@@ -585,69 +585,143 @@ class UCIFileGeneratorApp(QMainWindow):
         self.pdf_base_url = (
             "https://hydrologicmodels.tamu.edu/wp-content/uploads/sites/103/2018/09/HSPF_User-Manual.pdf"
         )
-        self.setWindowTitle("HSPF UCI File Generator")
-        self.setGeometry(100, 100, 700, 500)
+        self.setWindowTitle("HSP-F UCI File Generator")
+        self.setGeometry(100, 100, 900, 600)  # Increased size for better spacing
+
+        # Set the application icon
+        self.setWindowIcon(QIcon("E:\Projects\Python\HSPF\Logo.png"))  # Replace 'icon.ico' with your icon file path
+
+        # Apply stylesheet for modern UI
+        style_sheet = """
+        QPushButton {
+            background-color: #000000;  /* black background */
+            color: #e1e6e8;  /* White text */
+            border-radius: 1px;  /* Rounded corners */
+            padding: 6px 12px;  /* Padding */
+            font-size: 14px;  /* Font size */
+        }
+        QPushButton:hover {
+            background-color: #05080a;  /* dark blue on hover */
+        }
+        QGroupBox {
+            font-size: 16px;  /* Group box title font size */
+            font-weight: bold;  /* Bold group box title */
+            border: 2px solid gray;  /* Gray border */
+            border-radius: 1px;  /* Rounded group box */
+            margin-top: 10px;  /* Margin above the group box */
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;  /* Title position */
+            padding: 0 5px;  /* Padding around title */
+        }
+        """
+        self.setStyleSheet(style_sheet)
 
         self.section_buttons = {}
         self.shapes_by_id = {}
-        self.section_data = {}  # e.g. {"GLOBAL": {...}, "FILES": {...}}
+        self.section_data = {}
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
+        # Add group boxes for Inputs, Outputs, and Sections
+        main_layout.addWidget(self.create_input_group())
+        main_layout.addWidget(self.create_output_group())
+        main_layout.addWidget(self.create_sections_group())
+
+    # -----------------------------------------
+    # Create Input Group Box
+    # -----------------------------------------
+    def create_input_group(self):
+        input_group = QGroupBox("Inputs")
+        input_layout = QVBoxLayout()
+
+        # Add spacing between buttons
+        input_layout.setSpacing(10)
+        input_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Import Draw.io File
+        self.import_button = QPushButton("Import Draw.io File")
+        self.import_button.clicked.connect(self.import_drawio_file)
+        input_layout.addWidget(self.import_button)
+
+        # Load JSON
+        self.load_json_button = QPushButton("Load JSON")
+        self.load_json_button.clicked.connect(self.load_json_data)
+        input_layout.addWidget(self.load_json_button)
+
+        # Load Excel
+        self.load_excel_button = QPushButton("Load Excel File")
+        self.load_excel_button.clicked.connect(self.load_drainage_areas)
+        input_layout.addWidget(self.load_excel_button)
+
+        input_group.setLayout(input_layout)
+        return input_group
+
+    # -----------------------------------------
+    # Create Output Group Box
+    # -----------------------------------------
+    def create_output_group(self):
+        output_group = QGroupBox("Outputs")
+        output_layout = QVBoxLayout()
+
+        # Show Imported Model
+        self.show_model_button = QPushButton("Show Imported Model")
+        self.show_model_button.clicked.connect(self.show_imported_model)
+        output_layout.addWidget(self.show_model_button)
+
+        # Save JSON
+        self.save_json_button = QPushButton("Save JSON")
+        self.save_json_button.clicked.connect(self.save_json_data)
+        output_layout.addWidget(self.save_json_button)
+
+        output_group.setLayout(output_layout)
+        return output_group
+
+    # -----------------------------------------
+    # Create Sections Group Box
+    # -----------------------------------------
+    def create_sections_group(self):
+        sections_group = QGroupBox("UCI Sections")
+        sections_layout = QVBoxLayout()
+
         # Add buttons for each section
-        self.add_section_button(main_layout, "GLOBAL",
+        self.add_section_button(sections_layout, "GLOBAL",
                                 "Defines global simulation parameters.",
                                 self.global_section)
-        self.add_section_button(main_layout, "FILES",
+        self.add_section_button(sections_layout, "FILES",
                                 "Specifies file names for input and output.",
                                 self.files_section)
-        self.add_section_button(main_layout, "OPN SEQUENCE",
+        self.add_section_button(sections_layout, "OPN SEQUENCE",
                                 "Defines the operation sequence.",
                                 self.opn_sequence_section)
-        self.add_section_button(main_layout, "PERLND",
+        self.add_section_button(sections_layout, "PERLND",
                                 "Parameters for pervious land areas.",
                                 self.perlnd_section)
-        self.add_section_button(main_layout, "IMPLND",
+        self.add_section_button(sections_layout, "IMPLND",
                                 "Parameters for impervious land areas.",
                                 self.implnd_section)
-        self.add_section_button(main_layout, "RCHRES",
+        self.add_section_button(sections_layout, "RCHRES",
                                 "Routing for reaches/reservoirs.",
                                 self.rchres_section)
-        self.add_section_button(main_layout, "FTABLES",
+        self.add_section_button(sections_layout, "FTABLES",
                                 "Specifies tables for flow routing.",
                                 self.ftables_section)
-        self.add_section_button(main_layout, "EXT SOURCES",
+        self.add_section_button(sections_layout, "EXT SOURCES",
                                 "Defines external sources of input.",
                                 self.ext_sources_section)
-        self.add_section_button(main_layout, "EXT TARGETS",
+        self.add_section_button(sections_layout, "EXT TARGETS",
                                 "Specifies targets for external inputs.",
                                 self.ext_targets_section)
-        self.add_section_button(main_layout, "NETWORK",
+        self.add_section_button(sections_layout, "NETWORK",
                                 "Defines flow relationships.",
                                 self.network_section)
 
-        # Import/Show Model + JSON load/save
-        import_layout = QHBoxLayout()
-        self.import_button = QPushButton("Import Draw.io File")
-        self.import_button.clicked.connect(self.import_drawio_file)
-        import_layout.addWidget(self.import_button)
-
-        self.show_model_button = QPushButton("Show Imported Model")
-        self.show_model_button.clicked.connect(self.show_imported_model)
-        import_layout.addWidget(self.show_model_button)
-
-        self.load_json_button = QPushButton("Load JSON")
-        self.load_json_button.clicked.connect(self.load_json_data)
-        import_layout.addWidget(self.load_json_button)
-
-        self.save_json_button = QPushButton("Save JSON")
-        self.save_json_button.clicked.connect(self.save_json_data)
-        import_layout.addWidget(self.save_json_button)
-
-        main_layout.addLayout(import_layout)
+        sections_group.setLayout(sections_layout)
+        return sections_group
 
     # ------------------------------------------------
     # Add a section button (with a help "?") to the UI
