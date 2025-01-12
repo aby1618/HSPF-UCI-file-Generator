@@ -594,20 +594,20 @@ class UCIFileGeneratorApp(QMainWindow):
         # Apply stylesheet for modern UI
         style_sheet = """
         QPushButton {
-            background-color: #000000;  /* black background */
+            background-color: #2b2b2b;  /* black background */
             color: #e1e6e8;  /* White text */
-            border-radius: 1px;  /* Rounded corners */
+            border-radius: 15px;  /* Rounded corners */
             padding: 6px 12px;  /* Padding */
             font-size: 14px;  /* Font size */
         }
         QPushButton:hover {
-            background-color: #05080a;  /* dark blue on hover */
+            background-color: #333333;  /* dark blue on hover */
         }
         QGroupBox {
             font-size: 16px;  /* Group box title font size */
             font-weight: bold;  /* Bold group box title */
             border: 2px solid gray;  /* Gray border */
-            border-radius: 1px;  /* Rounded group box */
+            border-radius: 10px;  /* Rounded group box */
             margin-top: 10px;  /* Margin above the group box */
         }
         QGroupBox::title {
@@ -636,6 +636,9 @@ class UCIFileGeneratorApp(QMainWindow):
     # Create Input Group Box
     # -----------------------------------------
     def create_input_group(self):
+        """
+        Creates the Inputs group box containing the Import, Load JSON, and Load Excel buttons.
+        """
         input_group = QGroupBox("Inputs")
         input_layout = QVBoxLayout()
 
@@ -643,21 +646,50 @@ class UCIFileGeneratorApp(QMainWindow):
         input_layout.setSpacing(10)
         input_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Import Draw.io File
+        # Import Draw.io File button
         self.import_button = QPushButton("Import Draw.io File")
         self.import_button.clicked.connect(self.import_drawio_file)
         input_layout.addWidget(self.import_button)
 
-        # Load JSON
+        # Load JSON button
         self.load_json_button = QPushButton("Load JSON")
         self.load_json_button.clicked.connect(self.load_json_data)
         input_layout.addWidget(self.load_json_button)
 
-        # Load Excel
+        # Load Excel File button with tick mark and label in a compact layout
+        excel_layout = QHBoxLayout()
         self.load_excel_button = QPushButton("Load Excel File")
         self.load_excel_button.clicked.connect(self.load_drainage_areas)
-        input_layout.addWidget(self.load_excel_button)
+        self.load_excel_button.setToolTip("No file selected")  # Default tooltip
+        excel_layout.addWidget(self.load_excel_button)
 
+        # Tick mark and label container
+        self.tick_label_container = QHBoxLayout()
+
+        # Tick mark button
+        self.excel_tick_button = QPushButton("✔")
+        self.excel_tick_button.setFixedSize(35, 35)
+        self.excel_tick_button.setStyleSheet(
+            "background-color: darkgreen; color: white; font-weight: bold; border-radius: 15px;"
+        )
+        self.excel_tick_button.setVisible(False)  # Initially hidden
+        self.excel_tick_button.clicked.connect(self.toggle_excel_tooltip)
+        self.tick_label_container.addWidget(self.excel_tick_button)
+
+        # Label for full path toggle
+        self.toggle_label = QLabel("Click for Full Path")
+        self.toggle_label.setStyleSheet(
+            "color: lightgray; font-size: 12px; padding-left: 5px;"
+        )
+        self.toggle_label.setVisible(False)  # Initially hidden
+        self.toggle_label.mousePressEvent = self.toggle_full_path
+        self.tick_label_container.addWidget(self.toggle_label)
+
+        # Add tick mark and label container to the Excel layout
+        excel_layout.addLayout(self.tick_label_container)
+
+        # Add Excel layout to the main input layout
+        input_layout.addLayout(excel_layout)
         input_group.setLayout(input_layout)
         return input_group
 
@@ -688,37 +720,37 @@ class UCIFileGeneratorApp(QMainWindow):
         sections_group = QGroupBox("UCI Sections")
         sections_layout = QVBoxLayout()
 
-        # Add buttons for each section
+        # Add buttons for each section with revised help text and manual links
         self.add_section_button(sections_layout, "GLOBAL",
-                                "Defines global simulation parameters.",
-                                self.global_section)
+                                "Specifies the global simulation parameters, including model name, time step, simulation start/end dates, and unit system.",
+                                self.global_section, pdf_page=28)
         self.add_section_button(sections_layout, "FILES",
-                                "Specifies file names for input and output.",
-                                self.files_section)
+                                "Defines the input and output file configurations, including WDM files, error logs, and message logs used by the simulation.",
+                                self.files_section, pdf_page=52)
         self.add_section_button(sections_layout, "OPN SEQUENCE",
-                                "Defines the operation sequence.",
-                                self.opn_sequence_section)
+                                "Specifies the sequence of operations for hydrologic and hydraulic processes, such as subcatchments, reaches, and reservoirs.",
+                                self.opn_sequence_section, pdf_page=53)
         self.add_section_button(sections_layout, "PERLND",
-                                "Parameters for pervious land areas.",
-                                self.perlnd_section)
+                                "Defines parameters for pervious land areas, including surface runoff, infiltration, and interflow processes.",
+                                self.perlnd_section, pdf_page=66)
         self.add_section_button(sections_layout, "IMPLND",
-                                "Parameters for impervious land areas.",
-                                self.implnd_section)
+                                "Specifies parameters for impervious land areas, focusing on surface runoff processes and water balance calculations.",
+                                self.implnd_section, pdf_page=68)
         self.add_section_button(sections_layout, "RCHRES",
-                                "Routing for reaches/reservoirs.",
-                                self.rchres_section)
+                                "Manages routing and storage for reaches and reservoirs, including flow routing, sediment transport, and water quality simulations.",
+                                self.rchres_section, pdf_page=70)
         self.add_section_button(sections_layout, "FTABLES",
-                                "Specifies tables for flow routing.",
-                                self.ftables_section)
+                                "Defines flow tables (FTABLEs) for routing water through channels and reservoirs, specifying stage-discharge relationships.",
+                                self.ftables_section, pdf_page=72)
         self.add_section_button(sections_layout, "EXT SOURCES",
-                                "Defines external sources of input.",
-                                self.ext_sources_section)
+                                "Specifies external sources of input, including precipitation, point source flows, and other inflows to the hydrologic system.",
+                                self.ext_sources_section, pdf_page=74)
         self.add_section_button(sections_layout, "EXT TARGETS",
-                                "Specifies targets for external inputs.",
-                                self.ext_targets_section)
+                                "Defines output targets for external inputs, such as monitoring locations or downstream flow points.",
+                                self.ext_targets_section, pdf_page=76)
         self.add_section_button(sections_layout, "NETWORK",
-                                "Defines flow relationships.",
-                                self.network_section)
+                                "Specifies flow relationships between elements like pervious land, impervious land, reaches, and reservoirs.",
+                                self.network_section, pdf_page=78)
 
         sections_group.setLayout(sections_layout)
         return sections_group
@@ -726,21 +758,51 @@ class UCIFileGeneratorApp(QMainWindow):
     # ------------------------------------------------
     # Add a section button (with a help "?") to the UI
     # ------------------------------------------------
-    def add_section_button(self, layout, section_name, help_text, callback):
+    def add_section_button(self, layout, section_name, help_text, callback, pdf_page=None):
+        """
+        Adds a section button and help button to the layout.
+        """
         section_layout = QHBoxLayout()
         section_button = QPushButton(section_name)
         section_button.clicked.connect(callback)
         help_button = QPushButton("?")
         help_button.setMaximumWidth(30)
-        help_button.clicked.connect(lambda: self.show_help(section_name, help_text))
+
+        # Pass detailed help text and PDF page to the help dialog
+        help_button.clicked.connect(
+            lambda: self.show_help(section_name, help_text, pdf_page)
+        )
         section_layout.addWidget(section_button)
         section_layout.addWidget(help_button)
         layout.addLayout(section_layout)
 
         self.section_buttons[section_name] = section_button
 
-    def show_help(self, title, message):
-        QMessageBox.information(self, title, message)
+    def show_help(self, title, message, pdf_page=None):
+        """
+        Displays a help dialog with detailed text and a link to the manual page.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Help for {title}")
+        layout = QVBoxLayout(dialog)
+
+        info_label = QLabel()
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setOpenExternalLinks(True)
+
+        # Add manual link if pdf_page is provided
+        link_html = ""
+        if pdf_page:
+            link_html = f"<br><a href='{self.pdf_base_url}#page={pdf_page}' target='_blank'>Read more</a>"
+        info_label.setText(f"{message}{link_html}")
+        layout.addWidget(info_label)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+
+        dialog.setLayout(layout)
+        dialog.exec()
 
     # -----------------------------------------
     # JSON Load/Save
@@ -996,7 +1058,7 @@ class UCIFileGeneratorApp(QMainWindow):
 
     def load_drainage_areas(self):
         """
-        Load drainage areas from the Excel file into a mapping.
+        Load drainage areas from the Excel file into a mapping and display confirmation.
         """
         file_dialog = QFileDialog(self)
         excel_file, _ = file_dialog.getOpenFileName(
@@ -1010,19 +1072,68 @@ class UCIFileGeneratorApp(QMainWindow):
             df = pd.read_excel(excel_file)
             drainage_area_mapping = {}
             for _, row in df.iterrows():
-                subcatchment = int(row["SUBCATCHMENT"])  # Convert to integer to avoid extra `.0`
+                subcatchment = int(row["SUBCATCHMENT"])
                 perlnd_area = row["PERLND"]
                 implnd_area = row["IMPLND"]
 
                 drainage_area_mapping[f"PERLND {subcatchment}.0"] = perlnd_area
                 drainage_area_mapping[f"IMPLND {subcatchment}.0"] = implnd_area
 
-            print(f"Drainage Area Mapping Loaded: {drainage_area_mapping}")  # Debug
+            # Confirmation message
+            QMessageBox.information(self, "Success", "Excel file has been loaded successfully.")
+
+            # Update tick mark button and toggle label visibility and tooltip
+            self.excel_tick_button.setVisible(True)
+            self.toggle_label.setVisible(True)
+            self.update_file_tooltip(self.load_excel_button, excel_file)
+
             return drainage_area_mapping
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load Excel file:\n{e}")
             return {}
 
+    def update_file_tooltip(self, button, file_path):
+        """
+        Update the tooltip for the tick mark button and label to show the file name or full path.
+        """
+        self.selected_file_name = file_path.split("/")[-1]  # Extract the file name
+        self.selected_full_path = file_path  # Full path of the file
+        self.is_showing_full_path = False  # Default state: show file name
+
+        # Set default tooltip to file name
+        button.setToolTip(f"File: {self.selected_file_name}")
+        self.toggle_label.setToolTip(f"Click to view full path: {self.selected_full_path}")
+
+    def toggle_full_path(self, event):
+        """
+        Toggles the tooltip and label text between file name and full path.
+        """
+        if self.is_showing_full_path:
+            # Switch to file name
+            self.excel_tick_button.setToolTip(f"File: {self.selected_file_name}")
+            self.toggle_label.setText("Click for Full Path")
+            self.is_showing_full_path = False
+        else:
+            # Switch to full path
+            self.excel_tick_button.setToolTip(f"Full Path: {self.selected_full_path}")
+            self.toggle_label.setText("Click for File Name")
+            self.is_showing_full_path = True
+
+    # -----------------------------------------
+    # Add Tooltip Toggle Functionality
+    # -----------------------------------------
+    def toggle_excel_tooltip(self):
+        """
+        Toggles the tooltip between the file name and full file path for the tick mark button.
+        """
+        current_tooltip = self.excel_tick_button.toolTip()
+        if "Full Path" in current_tooltip:
+            # Switch to showing only the file name
+            file_name = current_tooltip.split("/")[-1]  # Extract file name
+            self.excel_tick_button.setToolTip(f"File: {file_name}")
+        else:
+            # Switch to showing the full file path
+            self.excel_tick_button.setToolTip(f"Full Path: {current_tooltip.split(': ')[1]}")
 
 # -------------------------------------------------------
 # Generate text for GLOBAL (you could add others similarly)
