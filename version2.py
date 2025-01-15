@@ -3,8 +3,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QMessageBox,
     QDialog, QFormLayout, QPlainTextEdit, QDateEdit,QGroupBox
 )
-from PySide6.QtGui import Qt, QIcon
-from PySide6.QtCore import QDate
+from PySide6.QtGui import Qt, QIcon,QMouseEvent
+from PySide6.QtCore import QDate,QSize
 import webbrowser
 import sys
 from lxml import etree
@@ -430,7 +430,6 @@ def normalize_target_types(shapes_by_id):
             print(f"Normalizing {label}: {hydro_type} -> RCHRES")  # Debug
             shapes_by_id[shape_id]["hydro_type"] = "RCHRES"
 
-
 def build_graph(shapes_by_id, edges):
     for (src, tgt, style) in edges:
         if src in shapes_by_id and tgt in shapes_by_id:
@@ -588,14 +587,22 @@ class UCIFileGeneratorApp(QMainWindow):
         self.pdf_base_url = (
             "https://hydrologicmodels.tamu.edu/wp-content/uploads/sites/103/2018/09/HSPF_User-Manual.pdf"
         )
+
+        self.setWindowFlags(Qt.FramelessWindowHint)  # Remove native title bar
+
         self.setWindowTitle("HSP-F UCI File Generator")
         self.setGeometry(100, 100, 900, 600)  # Increased size for better spacing
 
         # Set the application icon
-        self.setWindowIcon(QIcon("E:\Projects\Python\HSPF\Logo.png"))  # Replace 'icon.ico' with your icon file path
+        self.setWindowIcon(QIcon("Icon.png"))  # Replace 'icon.ico' with your icon file path
 
         # Apply stylesheet for modern UI
         style_sheet = """
+        QMainWindow {
+            background-color: #1e1e1e;  /* Dark gray background */
+            color: #e1e6e8;  /* Light text for readability */
+        }
+        
         QPushButton {
             background-color: #2b2b2b;  /* black background */
             color: #e1e6e8;  /* White text */
@@ -609,6 +616,7 @@ class UCIFileGeneratorApp(QMainWindow):
         QGroupBox {
             font-size: 16px;  /* Group box title font size */
             font-weight: bold;  /* Bold group box title */
+            color: #e1e6e8;  /* White text */
             border: 2px solid gray;  /* Gray border */
             border-radius: 10px;  /* Rounded group box */
             margin-top: 10px;  /* Margin above the group box */
@@ -625,15 +633,66 @@ class UCIFileGeneratorApp(QMainWindow):
         self.shapes_by_id = {}
         self.section_data = {}
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Main layout for the window
         main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        main_widget = QWidget()
+        main_widget.setLayout(main_layout)
+        self.setCentralWidget(main_widget)
 
-        # Add group boxes for Inputs, Outputs, and Sections
-        main_layout.addWidget(self.create_input_group())
-        main_layout.addWidget(self.create_output_group())
-        main_layout.addWidget(self.create_sections_group())
+        # Custom Title Bar
+        main_layout.addWidget(self.create_custom_title_bar())
+
+        # Content layout for Inputs, Outputs, and Sections
+        content_widget = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.addWidget(self.create_input_group())
+        content_layout.addWidget(self.create_output_group())
+        content_layout.addWidget(self.create_sections_group())
+        content_widget.setLayout(content_layout)
+        main_layout.addWidget(content_widget)
+
+    def create_custom_title_bar(self):
+        title_bar = QWidget()
+        title_bar.setStyleSheet("background-color: dark grey; color: white;")
+        title_bar.setFixedHeight(40)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(10, 0, 10, 0)
+
+        # Window title
+        title_label = QLabel("HSP-F UCI File Generator")
+        title_label.setStyleSheet("color: white; font-size: 14px;")
+        layout.addWidget(title_label)
+
+        # Spacer
+        layout.addStretch(1)
+
+        # Minimize button
+        minimize_button = QPushButton("-")
+        minimize_button.setFixedSize(QSize(30, 30))
+        minimize_button.setStyleSheet("background-color: grey; color: white; border: none;")
+        minimize_button.clicked.connect(self.showMinimized)
+        layout.addWidget(minimize_button)
+
+        # Close button
+        close_button = QPushButton("×")
+        close_button.setFixedSize(QSize(30, 30))
+        close_button.setStyleSheet("background-color: red; color: white; border: none;")
+        close_button.clicked.connect(self.close)
+        layout.addWidget(close_button)
+
+        title_bar.setLayout(layout)
+        return title_bar
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() == Qt.LeftButton:
+            self.move(event.globalPos() - self.drag_position)
+            event.accept()
 
     # -----------------------------------------
     # Create Input Group Box
@@ -1245,7 +1304,6 @@ class UCIFileGeneratorApp(QMainWindow):
             else:
                 # Switch to full path
                 self.json_tick_button.setToolTip(f"Full Path: {self.json_tick_button.full_path}")
-
 
 # -------------------------------------------------------
 # Generate text for GLOBAL (you could add others similarly)
