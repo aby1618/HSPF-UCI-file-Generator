@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QMessageBox,
     QDialog, QFormLayout, QPlainTextEdit, QDateEdit,QGroupBox
 )
-from PySide6.QtGui import Qt, QIcon,QMouseEvent
+from PySide6.QtGui import Qt, QIcon,QMouseEvent, QPixmap
 from PySide6.QtCore import QDate,QSize
 import webbrowser
 import sys
@@ -658,6 +658,12 @@ class UCIFileGeneratorApp(QMainWindow):
 
         layout = QHBoxLayout()
         layout.setContentsMargins(10, 0, 10, 0)
+
+        # Add logo to the title bar
+        logo_label = QLabel()
+        logo_pixmap = QPixmap("Icon.png")  # Replace with your logo image path
+        logo_label.setPixmap(logo_pixmap.scaled(30, 30, Qt.KeepAspectRatio))  # Adjust size
+        layout.addWidget(logo_label)
 
         # Window title
         title_label = QLabel("HSP-F UCI File Generator")
